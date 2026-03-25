@@ -344,8 +344,12 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
         new_label = rename_map.get(old_label, old_label.lower())
         processed_channels[new_label] = data
         # Mapping the sampling rate to the new label
-        processed_fs[new_label] = physiological_fs.get(old_label, 200.0) # Default to 200 if missing
-    
+        if old_label in physiological_fs:
+            processed_fs[new_label] = physiological_fs[old_label]
+        else:
+            # Report error and stop if no FS is found for a kept channel
+            raise KeyError(f"Sampling frequency (fs) not found for channel '{old_label}' ")
+        
     if 'physiological_data' in locals(): del physiological_data
 
     # Step 3: Construct Bipolar Derivations
@@ -354,7 +358,7 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
         ('c3-m2', 'c3', ['m2']), ('c4-m1', 'c4', ['m1']),
         ('o1-m2', 'o1', ['m2']), ('o2-m1', 'o2', ['m1']),
         ('e1-m2', 'e1', ['m2']), ('e2-m1', 'e2', ['m1']),
-        ('chin1-chin2', 'chin1', ['chin2']),
+        ('chin1-chin2', 'chin 1', ['chin 2']),
         ('lat', 'lleg+', ['lleg-']), ('rat', 'rleg+', ['rleg-'])
     ]
 
@@ -508,7 +512,7 @@ def extract_algorithmic_annotations_features(algo_data):
     features.extend([ahi_auto, arousal_auto, limb_auto])
 
     # --- 2. Sleep Architecture (from stage_caisr) ---
-    # Standard labels: 0=W, 1=N1, 2=N2, 3=N3, 4=R (or similar mapping)
+    # Standard labels: 5=W, 4=R, 3=N1, 2=N2, 1=N3 (or similar mapping)
     stages = algo_data.get('stage_caisr', np.array([]))
     # Filter out invalid/background values (like the 9.0 in your sample)
     valid_stages = stages[stages < 9.0]
@@ -523,7 +527,7 @@ def extract_algorithmic_annotations_features(algo_data):
         n3_pct = np.mean(valid_stages == 1)
         
         # Sleep Efficiency: (N1+N2+N3+R) / Total
-        efficiency = np.mean(valid_stages > 0)
+        efficiency = np.mean((valid_stages >= 1) & (valid_stages <= 4))
     else:
         w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = 0.0
 
