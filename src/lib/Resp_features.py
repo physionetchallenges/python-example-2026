@@ -1,18 +1,29 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objs as go
-from lib.peakedness import peakednessCost
+from .peakedness import peakednessCost
 from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
 from scipy.stats import kruskal
 from scipy.signal import resample, detrend
 import scipy.fft as fft
 from scipy.signal import butter, filtfilt
 
+try:
+    import plotly.graph_objs as go
+except ModuleNotFoundError:
+    go = None
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
+
 def plot_resp(Data, subjet = 1,  DownPrinting = 2):
     """
     Plot resp data using Plotly.
     """
+    if go is None:
+        raise ModuleNotFoundError("plotly is required for plot_resp")
+
     if type(Data) == dict:
         Data = pd.DataFrame(Data[str(subjet)])
         Data = Data.iloc[::DownPrinting, :]
@@ -119,7 +130,8 @@ def ODI_application(data, fs, plotflag=True, subjet=1):
     odi_deepness = np.mean(magnitudes) if magnitudes else 0.0
 
     if plotflag:
-        import matplotlib.pyplot as plt
+        if plt is None:
+            raise ModuleNotFoundError("matplotlib is required when plotflag=True")
         times = np.arange(len(sp)) / fs / 60.0  # minutos
         plt.figure(figsize=(10, 4))
         plt.plot(times, sp.values, label='SpO2')
@@ -291,6 +303,9 @@ def Significance_tests(RespData):
     results = pd.DataFrame.from_dict(results, orient='index', columns=['p_value'])
     results = results.reset_index()
     results.to_excel('./Graphs/kruskal_results.xlsx', index=False)
+
+    if plt is None:
+        raise ModuleNotFoundError("matplotlib is required for Significance_tests plotting")
 
     plt.plot(results['index'], results['p_value'])
     plt.axhline(y=0.05, color='r', linestyle='--') 

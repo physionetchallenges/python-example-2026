@@ -1,12 +1,21 @@
 from scipy.signal import butter, filtfilt
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from scipy.signal import welch
 import pandas as pd
 from scipy import signal
 from scipy.stats import kurtosis, entropy
-import matplotlib.pyplot as plt
+
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except ModuleNotFoundError:
+    go = None
+    make_subplots = None
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
 
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs  # Frecuencia de Nyquist
@@ -32,6 +41,8 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     return y
 
 def plot_EEG(df, columns, fs = 200):
+    if go is None or make_subplots is None:
+        raise ModuleNotFoundError("plotly is required for plot_EEG")
 
     fig = make_subplots(rows=len(columns), cols=1, 
                 shared_xaxes=True, 
@@ -55,6 +66,9 @@ def plot_EEG(df, columns, fs = 200):
     fig.show()
       
 def plot_EEG_sel(sel, name = "EEG_plot_raw.html"):
+    if go is None or make_subplots is None:
+        raise ModuleNotFoundError("plotly is required for plot_EEG_sel")
+
     fig = make_subplots(rows=len(sel), cols=1, 
                     shared_xaxes=True, 
                     vertical_spacing=0.02,

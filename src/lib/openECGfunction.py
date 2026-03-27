@@ -1,5 +1,5 @@
 import pyedflib
-from main_ECG_ver2 import ECGprocessing
+from ..main_ECG_ver2 import ECGprocessing
 import pandas as pd
 def openECG(physiological_data_file, patient_id):
 

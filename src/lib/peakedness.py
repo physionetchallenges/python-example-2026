@@ -3,11 +3,20 @@ import numpy as np
 from numpy.fft import fftshift
 from numpy.fft import fft
 from scipy.signal import detrend, find_peaks
-import matplotlib.pyplot as plt
-import plotly.graph_objs as go
-from plotly import subplots
 from time import time
 import os
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
+
+try:
+    import plotly.graph_objs as go
+    from plotly import subplots
+except ModuleNotFoundError:
+    go = None
+    subplots = None
 
 def setParamFr(Setup):
     if 'DT' not in Setup.keys():
@@ -265,6 +274,8 @@ def init_module(kk,vars,param, plotflag):
             # vars["bar_fr"][kk] = f[fj]
             
             if plotflag:
+                if plt is None:
+                    raise ModuleNotFoundError("matplotlib is required when plotflag=True")
                 plt.plot(f, averS)
                 plt.plot(f[fj], averS[fj], '-')
                 plt.title('Initialization - Averaged Spectrum')
@@ -605,6 +616,8 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
     t_fin = time()
 
     if plotflag:
+        if go is None or subplots is None:
+            raise ModuleNotFoundError("plotly is required when plotflag=True")
 
         fig = subplots.make_subplots(rows=2,shared_xaxes=True, subplot_titles=('Peak-condition averaged EDR Spectra in '+title,"EDR/RESP signals"), row_heights=[0.7, 0.3])
         

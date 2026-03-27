@@ -34,7 +34,7 @@ import os
 import pandas as pd
 import numpy as np
 import helper_code as helper_code
-import lib.EEG_functions as EEG_functions
+from .lib import EEG_functions
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

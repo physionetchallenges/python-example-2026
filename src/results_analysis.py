@@ -5,7 +5,7 @@ import os
 import plotly.express as px
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import lib.EEG_functions as EEG_functions
+from src.lib import EEG_functions
 import seaborn as sns
 import matplotlib.pyplot as plt
 import plotly.express as px

@@ -1,4 +1,4 @@
-import lib.Resp_features as Resp_features
+from .lib import Resp_features
 import sys 
 import os
 import pandas as pd
