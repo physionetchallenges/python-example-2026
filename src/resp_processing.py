@@ -135,4 +135,4 @@ def processResp(physiological_data, physiological_fs, csv_path):
                     "ODI_deepness": ODI_deepness,
                 })
     
-    return pd.DataFrame(resultados)
+    return np.array(resultados)

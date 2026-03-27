@@ -137,5 +137,5 @@ def processEEG(physiological_data, physiological_fs, csv_path):
                 **d,
                 **patient_summar
             })
-    df_results = pd.DataFrame(results)
+    df_results = np.array(results)
     return df_results

@@ -22,7 +22,8 @@ import sys
 from tqdm import tqdm
 
 from helper_code import *
-
+from src.resp_processing import processResp
+from src.eeg_processing import processEEG
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -90,7 +91,17 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
             physiological_fs,
             csv_path=csv_path
         )
-
+        resp_features = processResp(
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path
+        )
+        eeg_features = processEEG(
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path
+        )
+        physiological_features = np.concatenate([physiological_features, resp_features, eeg_features], axis = 1)
         algorithmic_annotations_file = os.path.join(
             data_folder,
             ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
