@@ -13,7 +13,7 @@ COMMAND="$1"
 # ============================================
 
 TRAIN_DATA_REL="data/training_set"
-RUN_DATA_REL="data/supplementary_set"
+RUN_DATA_REL="data/test_set"
 SMOKE_DATA_REL="data/training_smoke"
 
 IMAGE_NAME="cinc2026"

@@ -99,8 +99,8 @@ Guarda el modelo en `model/`.
 ./run.sh run
 ```
 
-Genera resultados en `outputs/` usando `data/supplementary_set/`.
-Si el dataset no tiene etiquetas (como en `supplementary_set`), el script omite la evaluación automáticamente.
+Genera resultados en `outputs/` usando `data/test_set/`.
+Si el dataset no tiene etiquetas (como en `test_set`), el script omite la evaluación automáticamente.
 
 ### Evaluar predicciones existentes completas
 
@@ -109,7 +109,7 @@ Si el dataset no tiene etiquetas (como en `supplementary_set`), el script omite 
 ```
 
 Reutiliza `outputs/demographics.csv` y muestra AUROC, AUPRC, Accuracy y F-measure sin volver a ejecutar inferencia.
-Evalúa contra `data/supplementary_set/`.
+Evalúa contra `data/test_set/`.
 Si no hay etiquetas en ese set, el script omite la evaluación automáticamente.
 
 ### Evaluar predicciones existentes del dataset smoke

@@ -23,11 +23,11 @@ param(
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # IMPORTANTE:
-# Si tu dataset no está en data/training_set o data/supplementary_set,
+# Si tu dataset no está en data/training_set o data/test_set,
 # modifica estas rutas.
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 $TRAIN_DATA_REL = "data/training_set"
-$RUN_DATA_REL = "data/supplementary_set"
+$RUN_DATA_REL = "data/test_set"
 $SMOKE_DATA_REL = "data/training_smoke"
 
 $IMAGE_NAME = "cinc2026"
