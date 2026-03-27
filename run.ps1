@@ -23,10 +23,11 @@ param(
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # IMPORTANTE:
-# Si tu dataset no está en data/training_set,
-# modifica esta ruta.
+# Si tu dataset no está en data/training_set o data/supplementary_set,
+# modifica estas rutas.
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-$FULL_DATA_REL = "data/training_set"
+$TRAIN_DATA_REL = "data/training_set"
+$RUN_DATA_REL = "data/supplementary_set"
 $SMOKE_DATA_REL = "data/training_smoke"
 
 $IMAGE_NAME = "cinc2026"
@@ -70,6 +71,16 @@ function Invoke-EvaluationDev($CodePath, $DataPath, $OutputPath, $Label) {
         python evaluate_model.py -d "/challenge/eval_data/$DEMOGRAPHICS_FILE" -o "$OutputPath/$DEMOGRAPHICS_FILE"
 }
 
+function Test-DatasetHasLabels($DataPath) {
+    $demographicsPath = Join-Path $DataPath $DEMOGRAPHICS_FILE
+    if (!(Test-Path $demographicsPath)) {
+        return $false
+    }
+
+    $header = Get-Content -Path $demographicsPath -TotalCount 1
+    return $header -match "Cognitive_Impairment"
+}
+
 # ============================================
 # COMANDOS
 # ============================================
@@ -85,7 +96,7 @@ function Create-Smoke {
 
 function Train-Full {
 
-    $FULL_DATA = Get-AbsolutePath $FULL_DATA_REL
+    $FULL_DATA = Get-AbsolutePath $TRAIN_DATA_REL
     $MODEL_FULL = Join-Path (Get-AbsolutePath ".") $MODEL_FULL_REL
 
     Ensure-Directory $MODEL_FULL
@@ -113,20 +124,24 @@ function Train-Smoke {
 
 function Run-Full {
 
-    $FULL_DATA = Get-AbsolutePath $FULL_DATA_REL
+    $RUN_DATA = Get-AbsolutePath $RUN_DATA_REL
     $MODEL_FULL = Get-AbsolutePath $MODEL_FULL_REL
     $OUT_FULL = Join-Path (Get-AbsolutePath ".") $OUT_FULL_REL
 
     Ensure-Directory $OUT_FULL
 
     docker run --rm `
-        -v "${FULL_DATA}:/challenge/holdout_data:ro" `
+        -v "${RUN_DATA}:/challenge/holdout_data:ro" `
         -v "${MODEL_FULL}:/challenge/model:ro" `
         -v "${OUT_FULL}:/challenge/holdout_outputs" `
         $IMAGE_NAME `
         python run_model.py -d holdout_data -m model -o holdout_outputs -v
 
-    Invoke-Evaluation $FULL_DATA $OUT_FULL "full-dataset"
+    if (Test-DatasetHasLabels $RUN_DATA) {
+        Invoke-Evaluation $RUN_DATA $OUT_FULL "run-dataset"
+    } else {
+        Write-Host "Skipping evaluation for run dataset (labels not present in $RUN_DATA_REL/$DEMOGRAPHICS_FILE)."
+    }
 }
 
 function Run-Smoke {
@@ -149,10 +164,14 @@ function Run-Smoke {
 
 function Eval-Full {
 
-    $FULL_DATA = Get-AbsolutePath $FULL_DATA_REL
+    $RUN_DATA = Get-AbsolutePath $RUN_DATA_REL
     $OUT_FULL = Get-AbsolutePath $OUT_FULL_REL
 
-    Invoke-Evaluation $FULL_DATA $OUT_FULL "full-dataset"
+    if (Test-DatasetHasLabels $RUN_DATA) {
+        Invoke-Evaluation $RUN_DATA $OUT_FULL "run-dataset"
+    } else {
+        Write-Host "Skipping evaluation for run dataset (labels not present in $RUN_DATA_REL/$DEMOGRAPHICS_FILE)."
+    }
 }
 
 function Eval-Smoke {

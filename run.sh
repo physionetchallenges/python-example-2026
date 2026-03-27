@@ -12,7 +12,8 @@ COMMAND="$1"
 # CONFIGURATION
 # ============================================
 
-FULL_DATA_REL="data/training_set"
+TRAIN_DATA_REL="data/training_set"
+RUN_DATA_REL="data/supplementary_set"
 SMOKE_DATA_REL="data/training_smoke"
 
 IMAGE_NAME="cinc2026"
@@ -91,6 +92,13 @@ evaluate_predictions_dev() {
             -o "$output_path/${DEMOGRAPHICS_FILE}"
 }
 
+dataset_has_labels() {
+    local data_dir="$1"
+    local demographics_path="$data_dir/$DEMOGRAPHICS_FILE"
+
+    [[ -f "$demographics_path" ]] && head -n 1 "$demographics_path" | grep -q "Cognitive_Impairment"
+}
+
 build_image() {
     docker_cli build -t "$IMAGE_NAME" .
 }
@@ -104,7 +112,7 @@ train_full() {
     local full_data model_full
     local full_data_docker model_full_docker
 
-    full_data="$(get_absolute_path "$FULL_DATA_REL")"
+    full_data="$(get_absolute_path "$TRAIN_DATA_REL")"
     model_full="$(get_absolute_path ".")/${MODEL_FULL_REL}"
     full_data_docker="$(to_docker_path "$full_data")"
     model_full_docker="$(to_docker_path "$model_full")"
@@ -137,26 +145,30 @@ train_smoke() {
 }
 
 run_full() {
-    local full_data model_full out_full
-    local full_data_docker model_full_docker out_full_docker
+    local run_data model_full out_full
+    local run_data_docker model_full_docker out_full_docker
 
-    full_data="$(get_absolute_path "$FULL_DATA_REL")"
+    run_data="$(get_absolute_path "$RUN_DATA_REL")"
     model_full="$(get_absolute_path "$MODEL_FULL_REL")"
     out_full="$(get_absolute_path ".")/${OUT_FULL_REL}"
-    full_data_docker="$(to_docker_path "$full_data")"
+    run_data_docker="$(to_docker_path "$run_data")"
     model_full_docker="$(to_docker_path "$model_full")"
     out_full_docker="$(to_docker_path "$out_full")"
 
     ensure_directory "$out_full"
 
     docker_cli run --rm \
-        -v "${full_data_docker}:/challenge/holdout_data:ro" \
+        -v "${run_data_docker}:/challenge/holdout_data:ro" \
         -v "${model_full_docker}:/challenge/model:ro" \
         -v "${out_full_docker}:/challenge/holdout_outputs" \
         "$IMAGE_NAME" \
         python run_model.py -d holdout_data -m model -o holdout_outputs -v
 
-    evaluate_predictions "$full_data" "$out_full" "full-dataset"
+    if dataset_has_labels "$run_data"; then
+        evaluate_predictions "$run_data" "$out_full" "run-dataset"
+    else
+        echo "Skipping evaluation for run dataset (labels not present in ${RUN_DATA_REL}/${DEMOGRAPHICS_FILE})."
+    fi
 }
 
 run_smoke() {
@@ -183,12 +195,16 @@ run_smoke() {
 }
 
 eval_full() {
-    local full_data out_full
+    local run_data out_full
 
-    full_data="$(get_absolute_path "$FULL_DATA_REL")"
+    run_data="$(get_absolute_path "$RUN_DATA_REL")"
     out_full="$(get_absolute_path "$OUT_FULL_REL")"
 
-    evaluate_predictions "$full_data" "$out_full" "full-dataset"
+    if dataset_has_labels "$run_data"; then
+        evaluate_predictions "$run_data" "$out_full" "run-dataset"
+    else
+        echo "Skipping evaluation for run dataset (labels not present in ${RUN_DATA_REL}/${DEMOGRAPHICS_FILE})."
+    fi
 }
 
 eval_smoke() {

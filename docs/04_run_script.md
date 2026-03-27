@@ -12,9 +12,10 @@ Aquí se define el orden recomendado y los comandos asociados.
 
 ```
 data/training_set/
+data/supplementary_set/
 ```
 
-⚠️ Si el dataset está en otra ubicación, modificar la variable `$FULL_DATA_REL`
+⚠️ Si el dataset está en otra ubicación, modificar las variables `$TRAIN_DATA_REL` y `$RUN_DATA_REL`
 dentro de `run.sh`.
 
 ⚠️ Ejecutar los comandos desde Git Bash.
@@ -98,7 +99,8 @@ Guarda el modelo en `model/`.
 ./run.sh run
 ```
 
-Genera resultados en `outputs/` y luego imprime métricas de evaluación en consola.
+Genera resultados en `outputs/` usando `data/supplementary_set/`.
+Si el dataset no tiene etiquetas (como en `supplementary_set`), el script omite la evaluación automáticamente.
 
 ### Evaluar predicciones existentes completas
 
@@ -107,6 +109,8 @@ Genera resultados en `outputs/` y luego imprime métricas de evaluación en cons
 ```
 
 Reutiliza `outputs/demographics.csv` y muestra AUROC, AUPRC, Accuracy y F-measure sin volver a ejecutar inferencia.
+Evalúa contra `data/supplementary_set/`.
+Si no hay etiquetas en ese set, el script omite la evaluación automáticamente.
 
 ### Evaluar predicciones existentes del dataset smoke
 
