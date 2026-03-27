@@ -2,7 +2,7 @@
 
 Entrenar con el dataset completo tarda aproximadamente 30–40 minutos con el modelo de ejemplo.
 
-Para desarrollo utilizamos un dataset reducido (5 sujetos).
+Para desarrollo utilizamos un dataset reducido (10 sujetos por defecto).
 
 Este documento describe cuándo y por qué usar smoke.
 Los comandos de ejecución están centralizados en `docs/04_run_script.md`.
@@ -11,9 +11,10 @@ Los comandos de ejecución están centralizados en `docs/04_run_script.md`.
 
 ## Qué incluye
 
-- Muestra reducida del dataset (5 sujetos)
+- Muestra reducida del dataset (10 sujetos por defecto)
 - Estructura compatible con el flujo oficial del proyecto
 - Directorio de salida en `data/training_smoke/`
+- `demographics.csv` filtrado para que solo incluya los registros copiados al smoke
 
 ## Para qué se usa
 
