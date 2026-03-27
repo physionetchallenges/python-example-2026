@@ -6,17 +6,13 @@ from scipy.signal import detrend, find_peaks
 from time import time
 import os
 
-try:
-    import matplotlib.pyplot as plt
-except ModuleNotFoundError:
-    plt = None
-
-try:
-    import plotly.graph_objs as go
-    from plotly import subplots
-except ModuleNotFoundError:
-    go = None
-    subplots = None
+def _safe_ratio(numerator, denominator, default=0.0):
+    if denominator is None or not np.isfinite(denominator) or denominator == 0:
+        return default
+    value = numerator / denominator
+    if np.isfinite(value):
+        return value
+    return default
 
 def setParamFr(Setup):
     if 'DT' not in Setup.keys():
@@ -207,7 +203,9 @@ def init_module(kk,vars,param, plotflag):
             
             # Peakedness
             # print(S[Omega])
-            Pkl = 100*sum(S[Omega_p])/sum(S[Omega])
+            band_power = np.sum(S[Omega])
+            peaky_power = np.sum(S[Omega_p])
+            Pkl = 100*_safe_ratio(peaky_power, band_power)
             
             if Pkl >= ksi_p:
                 Xkl[k,l] = 1
@@ -258,7 +256,8 @@ def init_module(kk,vars,param, plotflag):
             j_pk = j_pk[~j_del]
             
             # Cost function for deviation from previous fr and maximum power
-            C_a = 1-np.transpose(pk)/np.max(S)
+            max_s = np.max(S)
+            C_a = 1-_safe_ratio(np.transpose(pk), max_s, default=np.zeros_like(pk, dtype=float))
             fr_prev = vars["bar_fr"][np.max(kk,0)]
             C_f = abs(f[j_pk[:]]-fr_prev)/(2*d)
             # C_f = abs(f(i_pk(:))-fr_prev)/(Omega_r(2)-Omega(1));
@@ -273,13 +272,13 @@ def init_module(kk,vars,param, plotflag):
             # Save in vars
             # vars["bar_fr"][kk] = f[fj]
             
-            if plotflag:
-                if plt is None:
-                    raise ModuleNotFoundError("matplotlib is required when plotflag=True")
-                plt.plot(f, averS)
-                plt.plot(f[fj], averS[fj], '-')
-                plt.title('Initialization - Averaged Spectrum')
-                plt.show()
+            # if plotflag:
+            #     if plt is None:
+            #         raise ModuleNotFoundError("matplotlib is required when plotflag=True")
+            #     plt.plot(f, averS)
+            #     plt.plot(f[fj], averS[fj], '-')
+            #     plt.title('Initialization - Averaged Spectrum')
+            #     plt.show()
 
     return vars
     # # No spectra fulfill the initialization
@@ -323,11 +322,15 @@ def compute_Xkl( Skl, f, bar_fr, O, ksi_p, ksi_a, d):
             S = Skl[:, O[k], l]
             
             # % Define peakedness based on the power concentration
-            Pkl = 100*sum(S[Omega_p])/sum(S[Omega])
+            band_power = np.sum(S[Omega])
+            peaky_power = np.sum(S[Omega_p])
+            Pkl = 100*_safe_ratio(peaky_power, band_power)
 
             # % Define peakedness based on the absolute maximum
             # print(max(S))
-            Akl = 100*max(S[Omega])/max(S)
+            max_s = np.max(S)
+            max_band = np.max(S[Omega]) if np.any(Omega) else 0.0
+            Akl = 100*_safe_ratio(max_band, max_s)
             # % If the spectrum is concidered peaky by both conditions, mark as
             # % peaky
             if np.bitwise_and(Pkl >= ksi_p, Akl >= ksi_a):
@@ -474,7 +477,9 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
     vars["t_aver"] = vars["t_orig"][N:-N]
     if vars["t_aver"].shape[0] == 0:
         print("No hay tiempo para promediar")
-        return np.nan, np.nan, np.nan
+        empty_spectra = np.empty((vars["f"].shape[0], 0))
+        empty_used = np.empty((0, vars["L"]))
+        return np.array([]), empty_spectra, np.array([]), empty_used
     vars["Sk"] = np.empty((vars["f"].shape[0], vars["t_aver"].shape[0]))
     vars["Sk"][:] = np.nan
     vars["bar_fr"] = np.empty(( vars["t_aver"].shape[0]))
@@ -615,33 +620,33 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
     vars["t_orig"] = vars["t_orig"] + ts1
     t_fin = time()
 
-    if plotflag:
-        if go is None or subplots is None:
-            raise ModuleNotFoundError("plotly is required when plotflag=True")
+    # if plotflag:
+    #     if go is None or subplots is None:
+    #         raise ModuleNotFoundError("plotly is required when plotflag=True")
 
-        fig = subplots.make_subplots(rows=2,shared_xaxes=True, subplot_titles=('Peak-condition averaged EDR Spectra in '+title,"EDR/RESP signals"), row_heights=[0.7, 0.3])
+    #     fig = subplots.make_subplots(rows=2,shared_xaxes=True, subplot_titles=('Peak-condition averaged EDR Spectra in '+title,"EDR/RESP signals"), row_heights=[0.7, 0.3])
         
-        fig.add_heatmap(x=vars["t_aver"], y=vars["f"], z=vars["Sk"]/np.max(vars["Sk"]),colorscale='jet',colorbar=dict(orientation='h')) 
-        fig.update_layout(coloraxis_showscale=False)
-        fig.add_trace(go.Line(x=vars["t_aver"], y=vars["hat_fr"],name = 'f\u0302_r(k)'), row = 1, col=1)
-        fig.add_trace(go.Line(x=vars["t_aver"],y=vars["bar_fr"],name= 'f\u0304_r(k)'), row = 1, col=1)              
+    #     fig.add_heatmap(x=vars["t_aver"], y=vars["f"], z=vars["Sk"]/np.max(vars["Sk"]),colorscale='jet',colorbar=dict(orientation='h')) 
+    #     fig.update_layout(coloraxis_showscale=False)
+    #     fig.add_trace(go.Line(x=vars["t_aver"], y=vars["hat_fr"],name = 'f\u0302_r(k)'), row = 1, col=1)
+    #     fig.add_trace(go.Line(x=vars["t_aver"],y=vars["bar_fr"],name= 'f\u0304_r(k)'), row = 1, col=1)              
               
-        fig.add_trace(go.Line(x=vars["t_aver"],y=vars["used"]), row = 1, col=1)
-        # fig.axis([vars.t_aver(1), vars.t_aver(end), vars.f(1), vars.f(end)])
-        for i in range(signals.shape[1]):
-            fig.add_trace(go.Line(x=ts+ts1,y=signals[:,i],name = 'Signal '+str(i)), row = 2, col=1)
+    #     fig.add_trace(go.Line(x=vars["t_aver"],y=vars["used"]), row = 1, col=1)
+    #     # fig.axis([vars.t_aver(1), vars.t_aver(end), vars.f(1), vars.f(end)])
+    #     for i in range(signals.shape[1]):
+    #         fig.add_trace(go.Line(x=ts+ts1,y=signals[:,i],name = 'Signal '+str(i)), row = 2, col=1)
 
-        fig.update_layout(coloraxis_showscale=False)
-        fig.update_yaxes(title_text="f (Hz)", row=1, col=1)
-        fig.update_yaxes(title_text="(n.u.)", row=2, col=1)
-        fig.update_xaxes(title_text="time (s)", row=2, col=1)
-        if storeGraph:
-            os.makedirs("Graphs/Peakedness/"+str(subjet), exist_ok=True)
-            # fig.write_image(os.path.join("Graphs", "Peakedness",str(subjet),title+".png"))
-            fig.write_html(os.path.join("Graphs", "Peakedness",str(subjet),title+".html"))
-            # fig.write_image()
-        else:
-            fig.show()
+    #     fig.update_layout(coloraxis_showscale=False)
+    #     fig.update_yaxes(title_text="f (Hz)", row=1, col=1)
+    #     fig.update_yaxes(title_text="(n.u.)", row=2, col=1)
+    #     fig.update_xaxes(title_text="time (s)", row=2, col=1)
+    #     if storeGraph:
+    #         os.makedirs("Graphs/Peakedness/"+str(subjet), exist_ok=True)
+    #         # fig.write_image(os.path.join("Graphs", "Peakedness",str(subjet),title+".png"))
+    #         fig.write_html(os.path.join("Graphs", "Peakedness",str(subjet),title+".html"))
+    #         # fig.write_image()
+    #     else:
+    #         fig.show()
 
-    return vars["hat_fr"], vars["Sk"], vars["t_aver"]
+    return vars["hat_fr"], vars["Sk"], vars["t_aver"], vars["used"]
     # return vars["hat_fr"], vars["Sk"], vars["bar_fr"],vars["t_aver"], vars["f"], vars["used"]

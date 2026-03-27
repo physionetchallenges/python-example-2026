@@ -176,7 +176,7 @@ def Metrics_per_segment(Data):
                 section = sel_sujeto[secc].values
                 section = section[~np.isnan(section)]
 
-                hat_Br, Sk_Br, t_aver = peakedness_application(section, stage=secc, plotflag = False, subjet= subjet)
+                hat_Br, Sk_Br, t_aver, _ = peakedness_application(section, stage=secc, plotflag = False, subjet= subjet)
                 # print(f"Subjet: {subjet}, section: {secc} hat_Br: {hat_Br}, Sk_Br: {Sk_Br}")
                 
                 # Ajuste lineal

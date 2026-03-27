@@ -29,7 +29,7 @@ Uso típico:
 El módulo depende de `numpy`, `pandas`, `matplotlib`, `plotly` y de
 las utilidades definidas en `lib/helper_code` y `lib/EEG_functions`.
 """
-import sys 
+import sys
 import os
 import pandas as pd
 import numpy as np
@@ -39,103 +39,114 @@ from .lib import EEG_functions
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+EEG_FEATURE_NAMES = [
+    'EEG_Channel_Count',
+    'EEG_Rel_Delta',
+    'EEG_Rel_Theta',
+    'EEG_Rel_Alpha',
+    'EEG_Rel_Sigma',
+    'EEG_Rel_Beta',
+    'EEG_Theta_Alpha_Ratio',
+    'EEG_Hjorth_Complexity',
+]
+EEG_FEATURE_LENGTH = len(EEG_FEATURE_NAMES)
+
+
+def _normalize_label(text):
+    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
+    return ' '.join(normalized.split())
+
+
+def _split_aliases(raw_aliases):
+    return {_normalize_label(alias) for alias in str(raw_aliases).split(';') if alias}
+
+
+def _build_eeg_aliases(channels):
+    eeg_rows = channels[channels['Category'].eq('eeg')]
+    aliases = set()
+    for _, row in eeg_rows.iterrows():
+        aliases.update(_split_aliases(row['Channel_Names']))
+    return aliases
+
+
+def _resample_signal(signal, fs, target_fs):
+    signal = np.asarray(signal, dtype=float)
+    if signal.size == 0:
+        return signal, target_fs
+    if fs == target_fs:
+        return signal, target_fs
+
+    duration = signal.size / fs
+    target_samples = max(1, int(round(duration * target_fs)))
+    time_original = np.linspace(0, duration, signal.size)
+    time_target = np.linspace(0, duration, target_samples)
+    return np.interp(time_target, time_original, signal), target_fs
+
+
+def _extract_channel_metrics(signal, fs):
+    signal = np.nan_to_num(np.asarray(signal, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if signal.size < max(int(fs * 30), 2):
+        return None
+
+    if fs != 200:
+        signal, fs = _resample_signal(signal, fs, 200)
+
+    filtered = EEG_functions.butter_bandpass_filter(signal, lowcut=0.3, highcut=35, fs=fs, order=4)
+    signal_std = np.std(filtered)
+    if signal_std == 0 or not np.isfinite(signal_std):
+        return None
+
+    normalized = (filtered - np.mean(filtered)) / signal_std
+    epochs = EEG_functions.create_epochs(normalized, fs, epoch_duration=30)
+    if epochs.size == 0:
+        return None
+
+    band_powers, complexities = EEG_functions.extract_band_powers(epochs, fs, win_len=15)
+    if len(band_powers) > 60:
+        band_powers = band_powers.iloc[60:]
+        complexities = complexities.iloc[60:]
+    if band_powers.empty:
+        return None
+
+    total_power = band_powers.sum(axis=1).replace(0, np.nan)
+    relative_powers = band_powers.div(total_power, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0.0).mean()
+    alpha_power = float(relative_powers.get('Alpha', 0.0))
+    theta_power = float(relative_powers.get('Theta', 0.0))
+    theta_alpha_ratio = theta_power / alpha_power if alpha_power > 0 else 0.0
+
+    complexity_mean = float(
+        complexities['Hjorth_Complexity'].replace([np.inf, -np.inf], np.nan).fillna(0.0).mean()
+    ) if 'Hjorth_Complexity' in complexities else 0.0
+
+    return np.array([
+        float(relative_powers.get('Delta', 0.0)),
+        theta_power,
+        alpha_power,
+        float(relative_powers.get('Sigma', 0.0)),
+        float(relative_powers.get('Beta', 0.0)),
+        float(theta_alpha_ratio),
+        complexity_mean,
+    ], dtype=np.float32)
+
+
 def processEEG(physiological_data, physiological_fs, csv_path):
-
     channels = pd.read_csv(csv_path)
-    selectEEG = channels[channels['Category'].isin(['eeg'])]
+    eeg_aliases = _build_eeg_aliases(channels)
+    channel_metrics = []
 
-    for label in original_labels:
-        fs = physiological_fs[label]
+    for label, signal in physiological_data.items():
+        if label not in physiological_fs:
+            continue
+        if _normalize_label(label) not in eeg_aliases:
+            continue
 
-        data = []
-        original_labels = list(physiological_data.keys())
+        metrics = _extract_channel_metrics(signal, physiological_fs[label])
+        if metrics is not None:
+            channel_metrics.append(metrics)
 
-        # Listar canales para identificar los de interés (ej: C3-M2, O1-M2)
-        HayEEG = False
-        for i, label in enumerate(original_labels):
-            for index in selectEEG.index:
-                if label.lower() in selectEEG['Channel_Names'][index].lower():
-                    print(f"Canal seleccionado: {label}")
-                    labels.append(label)
-                    HayEEG = True
-                    break
-    
-    results = []
-    labels2 = []
-    if HayEEG:
-        Bipolar = pd.DataFrame()
-        if all(label in labels for label in ["F3", "F4", "M1", "M2"]):
-            Bipolar['F3-M2'] = physiological_data["F3"] - physiological_data["M2"]
-            Bipolar['F4-M1'] = physiological_data["F4"] - physiological_data["M1"]
-            labels2.append('F3-M2')
-            labels2.append('F4-M1')
-        if all(label in labels for label in ["C3", "C4", "M1", "M2"]):
-            Bipolar['C3-M2'] = physiological_data["C3"] - physiological_data["M2"]
-            Bipolar['C4-M1'] = physiological_data["C4"] - physiological_data["M1"]
-            labels2.append('C3-M2')
-            labels2.append('C4-M1')
-        if all(label in labels for label in ["O2", "O1", "M1", "M2"]):
-            Bipolar['O2-M2'] = physiological_data["O1"] - physiological_data["M2"]
-            Bipolar['O1-M1'] = physiological_data["O2"] - physiological_data["M1"]
-            labels2.append('O1-M1')
-            labels2.append('O2-M2')
-        # print(f"Archivo {file} tiene ECG, RESP y EEG. Se procesará con canales bipolares.")
-        
-        if not Bipolar.empty:
-            labels = []
-            for col in Bipolar.columns:
-                # print(f"Archivo: {file}, Canal: {col}, Frecuencia de muestreo: {sig.sampling_frequency} Hz, Duración: {len(Bipolar[col])/sig.sampling_frequency:.2f} segundos")
-                fs = physiological_data["M2"].sampling_frequency  # Asumimos que todos los canales tienen la misma frecuencia de muestreo
-                fil = EEG_functions.butter_bandpass_filter(Bipolar[col], lowcut=0.3, highcut=35, fs=fs, order=4)
-                norm = (fil-np.mean(fil))/np.std(fil)
-                
-                data.append(norm)  # Restar la media para centrar la señal
-                labels.append(col)
-            # columns = Bipolar.columns.tolist()
-        else:
-            labels = []
-            for l in labels:
-                # print(f"Archivo: {file}, Canal: {sig.label}, Frecuencia de muestreo: {sig.sampling_frequency} Hz, Duración: {len(sig.data)/sig.sampling_frequency:.2f} segundos")
-                fs = physiological_fs[l]
-                fil = EEG_functions.butter_bandpass_filter(physiological_data[l], lowcut=0.3, highcut=35, fs=fs, order=4)
-                norm = (fil-np.mean(fil))/np.std(fil)
-                labels.append(l)
-                data.append(norm)  # Restar la media para centrar la señal
+    if not channel_metrics:
+        return np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
 
-            # columns = [selEEG[i][1].label for i in range(len(selEEG))]
-        
-        
-        for i, elec in enumerate(labels):
-            epoch_length = 30  # Duración de cada época en segundos
-            if Bipolar.empty:
-                fs = physiological_fs[l]
-            else:
-                fs = physiological_fs['M1']
-
-            if fs != 200:
-                # print(f"Warning: Sampling frequency for channel {elec} in file {file} is {fs} Hz, expected 200 Hz. Check the data.")
-                duration = len(data[i]) / fs
-                time_original = np.linspace(0, duration, len(data[i]))
-                
-                num_samples_target = int(duration * 200 )
-                time_target = np.linspace(0, duration, num_samples_target)
-                data[i] = np.interp(time_target, time_original, data[i])
-                fs = 200  # Update fs to the target sampling frequency after resampling
-            
-            epochs = EEG_functions.create_epochs(data[i], fs, epoch_duration=epoch_length)
-
-            band_powers, complexities = EEG_functions.extract_band_powers(epochs, fs, win_len=15)
-            band_powers = band_powers.iloc[60:]  # Eliminar las primeras 60 épocas (30 min) para evitar el tiempo despierto al inicio de la grabación
-
-
-            # Ejecución
-            patient_summar = EEG_functions.get_patient_profile(band_powers)
-
-            d = complexities.iloc[:].std().to_dict() 
-            results.append({
-                'Channel': elec,
-                **d,
-                **patient_summar
-            })
-    df_results = np.array(results)
-    return df_results
+    stacked = np.vstack(channel_metrics)
+    aggregated = np.mean(stacked, axis=0)
+    return np.hstack([np.array([len(channel_metrics)], dtype=np.float32), aggregated]).astype(np.float32)
