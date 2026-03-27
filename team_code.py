@@ -14,7 +14,9 @@ import numpy as np
 import os
 import atexit
 import builtins
+import pandas as pd
 import re
+from concurrent.futures import ThreadPoolExecutor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 import sys
 from tqdm import tqdm
@@ -37,6 +39,77 @@ RUN_MODEL_PBAR_TOTAL = None
 ORIGINAL_PRINT = builtins.print
 PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
+RENAME_RULES_CACHE = {}
+MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
+
+
+def build_training_metadata_cache(patient_data_file):
+    metadata = pd.read_csv(patient_data_file)
+    demographics_cache = {}
+    diagnosis_cache = {}
+
+    for row in metadata.to_dict('records'):
+        patient_id = row[HEADERS['bids_folder']]
+        session_id = row[HEADERS['session_id']]
+        demographics_cache[(patient_id, session_id)] = row
+        diagnosis_cache[patient_id] = load_label(row)
+
+    return demographics_cache, diagnosis_cache
+
+
+def get_rename_rules(csv_path):
+    normalized_csv_path = os.path.abspath(csv_path)
+    rename_rules = RENAME_RULES_CACHE.get(normalized_csv_path)
+    if rename_rules is None:
+        rename_rules = load_rename_rules(normalized_csv_path)
+        RENAME_RULES_CACHE[normalized_csv_path] = rename_rules
+    return rename_rules
+
+
+def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
+    patient_id = record[HEADERS['bids_folder']]
+    site_id = record[HEADERS['site_id']]
+    session_id = record[HEADERS['session_id']]
+
+    try:
+        patient_data = demographics_cache.get((patient_id, session_id), {})
+        demographic_features = extract_demographic_features(patient_data)
+
+        physiological_data_file = os.path.join(
+            data_folder,
+            PHYSIOLOGICAL_DATA_SUBFOLDER,
+            site_id,
+            f"{patient_id}_ses-{session_id}.edf"
+        )
+        if not os.path.exists(physiological_data_file):
+            return patient_id, None, None, f"Missing physiological data for {patient_id}. Skipping..."
+
+        physiological_data, physiological_fs = load_signal_data(physiological_data_file)
+        physiological_features = extract_physiological_features(
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path
+        )
+
+        algorithmic_annotations_file = os.path.join(
+            data_folder,
+            ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
+            site_id,
+            f"{patient_id}_ses-{session_id}_caisr_annotations.edf"
+        )
+        algorithmic_annotations, algorithmic_fs = load_signal_data(algorithmic_annotations_file)
+        algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
+
+        label = diagnosis_cache.get(patient_id)
+
+        if label == 0 or label == 1:
+            feature_vector = np.hstack([demographic_features, physiological_features, algorithmic_features])
+            return patient_id, feature_vector, label, None
+
+        return patient_id, None, None, f"Invalid label for {patient_id}. Skipping..."
+
+    except Exception as e:
+        return patient_id, None, None, f"Error processing {patient_id}: {e}"
 
 
 def _close_run_model_pbar():
@@ -89,6 +162,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
 
     patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
     patient_metadata_list = find_patients(patient_data_file)
+    demographics_cache, diagnosis_cache = build_training_metadata_cache(patient_data_file)
     num_records = len(patient_metadata_list)
 
     if num_records == 0:
@@ -98,69 +172,34 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose:
         print('Extracting features and labels from the data...')
 
-    # Iterate over the records to extract the features and labels.
     features = list()
     labels = list()
-    
-    pbar = tqdm(range(num_records), desc="Extracting Features", unit="record", disable=not verbose)
-    for i in pbar:
-        try:
-            # Extract identifiers for this specific record
-            record = patient_metadata_list[i]
-            patient_id = record[HEADERS['bids_folder']]
-            site_id    = record[HEADERS['site_id']]
-            session_id = record[HEADERS['session_id']]
 
+    with ThreadPoolExecutor(max_workers=MAX_TRAIN_WORKERS) as executor:
+        results = executor.map(
+            lambda record: process_training_record(
+                record,
+                data_folder,
+                demographics_cache,
+                diagnosis_cache,
+                csv_path
+            ),
+            patient_metadata_list
+        )
+
+        pbar = tqdm(results, total=num_records, desc="Extracting Features", unit="record", disable=not verbose)
+        for patient_id, feature_vector, label, message in pbar:
             if verbose:
                 pbar.set_postfix({"patient": patient_id})
 
-            # Load the patient data.
-            patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-            patient_data = load_demographics(patient_data_file, patient_id, session_id)
-            demographic_features = extract_demographic_features(patient_data)
+            if message is not None:
+                tqdm.write(f"  ! {message}")
+                continue
 
-            # Load signal data.
+            features.append(feature_vector)
+            labels.append(label)
 
-            # Load the physiological signal.
-            physiological_data_file = os.path.join(data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}.edf")
-            # --- Check if the file actually exists before proceeding ---
-            if not os.path.exists(physiological_data_file):
-                if verbose:
-                    print(f"  ! Missing physiological data for {patient_id}. Skipping...")
-                continue # skip record
-            physiological_data, physiological_fs = load_signal_data(physiological_data_file)
-            physiological_features = extract_physiological_features(physiological_data, physiological_fs, csv_path=csv_path) # This function can rename, re-reference, resample, etc. the signal data.
-
-            # Load the algorithmic annotations.
-            algorithmic_annotations_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
-            algorithmic_annotations, algorithmic_fs = load_signal_data(algorithmic_annotations_file)
-            algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
-
-            # Load the human annotations; these data will not be available in the hidden validation and test sets.
-            human_annotations_file = os.path.join(data_folder, HUMAN_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_expert_annotations.edf")
-            human_annotations, human_fs = load_signal_data(human_annotations_file)
-            human_features = extract_human_annotations_features(human_annotations)
-
-            # Load the diagnoses; these data will not be available in the hidden validation and test sets.
-            diagnosis_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-            label = load_diagnoses(diagnosis_file, patient_id)
-
-            # Store the features and labels, but
-            # the human annotations are not available on the hidden validation and test sets, but you
-            # may want to consider how to use them for training.
-            if label == 0 or label == 1:
-                features.append(np.hstack([demographic_features, physiological_features, algorithmic_features]))
-                labels.append(label)
-
-            if 'physiological_data' in locals(): del physiological_data
-            if 'algorithmic_annotations' in locals(): del algorithmic_annotations
-
-        except Exception as e:
-            # If an error occurs (e.g., a record is corrupted), log it and move to the next
-            tqdm.write(f"  !!! Error processing record {i+1} ({patient_id}): {e}")
-            continue
-
-    pbar.close()
+        pbar.close()
 
     features = np.asarray(features, dtype=np.float32)
     labels = np.asarray(labels, dtype=bool)
@@ -332,7 +371,7 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
 
     # Step 1: Load rules and standardize names
     # Note: Use script-relative path or absolute path for robustness
-    rename_rules = load_rename_rules(os.path.abspath(csv_path))
+    rename_rules = get_rename_rules(csv_path)
     rename_map, cols_to_drop = standardize_channel_names_rename_only(original_labels, rename_rules)
 
     # Step 2: Apply renaming to BOTH signals and their corresponding FS
