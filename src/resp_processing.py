@@ -61,6 +61,7 @@ def processResp(physiological_data, physiological_fs, csv_path):
                     print(f"Warning: All values in the signal data for {label} are zero. Skipping feature extraction for this channel.")
                 else:
                     name = ""
+                name = "" #Bypass CPAP 
             elif label.lower() in selectResp['Channel_Names'][33].lower():
                 # CEPAP
                 name = ""
