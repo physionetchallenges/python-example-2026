@@ -93,8 +93,9 @@ def processEEG(physiological_data, physiological_fs, csv_path):
                 labels.append(col)
             # columns = Bipolar.columns.tolist()
         else:
+            labels2 = labels
             labels = []
-            for l in labels:
+            for l in labels2:
                 # print(f"Archivo: {file}, Canal: {sig.label}, Frecuencia de muestreo: {sig.sampling_frequency} Hz, Duración: {len(sig.data)/sig.sampling_frequency:.2f} segundos")
                 fs = physiological_fs[l]
                 fil = EEG_functions.butter_bandpass_filter(physiological_data[l], lowcut=0.3, highcut=35, fs=fs, order=4)
