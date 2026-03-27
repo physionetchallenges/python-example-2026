@@ -33,27 +33,109 @@ def plot_resp(Data, subjet = 1,  DownPrinting = 2):
 
 def peakedness_application(Data, stage, plotflag = False, subjet = 1):
     # print("Compute BR")
-    fs = 100
+    fs = 25
     Setup = {}
     Setup["K"] = 5
     Setup["DT"] = 5
     Setup["Ts"] = 60 #interval length of Welch periodograms (s)
     Setup["Tm"] = 20 #interval length of subintervals for Welch periodograms (s)
     # Setup["d"] = 0.1 #interval length of subintervals for Welch periodograms (s)
-    Setup["Omega_r"] = np.array([5, 20])/60 #respiratory rate range in Hz
+    Setup["Omega_r"] = np.array([5, 25])/60 #respiratory rate range in Hz
     Setup["plotflag"] = plotflag
-    Setup["Nfft"] = np.power(2,14)
+    Setup["Nfft"] = np.power(2,13)
     tsBR = np.arange(0,Data.shape[0]/fs,1/fs)
 
     if tsBR.shape[0] != Data.shape[0]:
         # print(f"tsBR.shape[0]: {tsBR.shape[0]}, Data.shape[0]: {Data.shape[0]}")
         tsBR = np.arange(0,Data.shape[0]/fs,1/fs)[:Data.shape[0]]
 
-    hat_Br, Sk_Br, t_aver = peakednessCost(Data, tsBR, fs, Setup, title = stage, storeGraph = False, subjet = subjet)
+    hat_Br, Sk_Br, t_aver, used = peakednessCost(Data, tsBR, fs, Setup, title = stage, storeGraph = False, subjet = subjet)
     # print(f"hat_Br: {hat_Br}, Sk_Br: {Sk_Br}, bar_Br: {bar_Br}, t_aver_Br: {t_aver_Br}, f_Br: {f_Br}, used_Br: {used_Br}")
         
     # print(hat_Br)       
-    return hat_Br, Sk_Br, t_aver
+    return hat_Br, Sk_Br, t_aver, used
+
+def ODI_application(data, fs, plotflag=True, subjet=1):
+    """Detecta desaturaciones de más del 3 % en la señal de saturación de
+    oxígeno (SpO2) y devuelve estadísticas básicas de los eventos.
+
+    El índice de desaturación de oxígeno (ODI) se define como el número de
+    episodios en los que la saturación cae al menos un 3 % respecto a una
+    línea de base móvil, normalizado por hora de grabación. Aquí se calcula
+    una línea base mediante la mediana móvil de 60 segundos y se agrupan
+    los índices consecutivos que cumplen el criterio en eventos únicos.
+
+    Args:
+        data (array-like): valores de SpO2 (0‑100).
+        fs (float): frecuencia de muestreo en Hz.
+        plotflag (bool): si True, dibuja la señal y marca los eventos.
+        subjet (int): identificador de sujeto (utilizado en títulos de gráficas).
+
+    Returns:
+        tuple:
+            * odi_mean (float): número de desaturaciones normalizado por hora.
+            * odi_std (float): desviación estándar de las magnitudes de caída
+              entre eventos (en porcentaje).
+    """
+    # convertir a serie para comodidad
+    sp = pd.Series(data)
+    if len(sp) == 0 or fs <= 0:
+        return 0.0, 0.0
+
+    # base móvil de 60 segundos (median para ser robusto). ventana en muestras
+    window = int(fs * 60)
+    if window < 1:
+        window = 1
+    baseline = sp.rolling(window, min_periods=1, center=True).median()
+
+    # diferencia de base menos señal; buscamos caídas >=3
+    diff = baseline - sp
+    mask = diff >= 3
+
+    # juntar índices contiguos en eventos
+    events = []  # lista de (start_idx, end_idx)
+    in_event = False
+    for idx, flag in mask.items():
+        if flag and not in_event:
+            start = idx
+            in_event = True
+        elif not flag and in_event:
+            end = prev_idx
+            events.append((start, end))
+            in_event = False
+        prev_idx = idx
+    if in_event:
+        events.append((start, prev_idx))
+
+    num_events = len(events)
+    duration_hours = len(sp) / fs / 3600.0
+    odi_mean = num_events / duration_hours if duration_hours > 0 else 0.0
+
+    # calcular magnitudes de caída en cada evento (tomando el valor más bajo)
+    magnitudes = []
+    for start, end in events:
+        mag = diff.loc[start:end].max()
+        magnitudes.append(mag)
+    odi_deepness = np.mean(magnitudes) if magnitudes else 0.0
+
+    if plotflag:
+        import matplotlib.pyplot as plt
+        times = np.arange(len(sp)) / fs / 60.0  # minutos
+        plt.figure(figsize=(10, 4))
+        plt.plot(times, sp.values, label='SpO2')
+        plt.plot(times, baseline.values, label='Baseline (60s med)')
+        for (start, end) in events:
+            t0 = start / fs / 60.0
+            t1 = end / fs / 60.0
+            plt.axvspan(t0, t1, color='red', alpha=0.3)
+        plt.xlabel('Tiempo (min)')
+        plt.ylabel('SpO2 (%)')
+        plt.title(f'Sujeto {subjet} - ODI detectado: {odi_mean:.2f} eventos/h')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+    return odi_mean, odi_deepness
 
 # Butterworth low-pass filter
 def lowpass_filter(signal, fs, cutoff=2.0, order=4):

@@ -1,114 +1,138 @@
-import numpy as np
-import pandas as pd
-import os
-import matplotlib.pyplot as plt
-import plotly.express as px
+import lib.Resp_features as Resp_features
 import sys 
-
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import os
+import pandas as pd
+import numpy as np
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import lib.helper_code as helper_code
-import lib.EEG_functions as EEG_functions
-import lib.Resp_features as Resp_features
 
-for hospital in ['I0006',"S0001",'I0004','I0007']:#'I0002',
-    print(f"Procesando hospital: {hospital}")
+def processResp(physiological_data, physiological_fs, csv_path):
 
-    if hospital == 'I0002' or hospital == 'I0006' or hospital == "S0001":
-        datapath =  'data/training_set/Physiological_data/'+hospital
-    else:
-        datapath =  'data/supplementary_set/Physiological_data/'+hospital
-            
-    channels = pd.read_csv("notebooks/channel_table.csv")
+    channels = pd.read_csv(csv_path)
     selectResp = channels[channels['Category'].isin(['resp'])]
 
-    demographics = pd.read_csv(os.path.join('C:/BSICoS/CincChallenge2026/CincChallenge_2026/data/training_set', "demographics.csv"))
+    resultados = {}
+    UsedFlow = 0
+    UsedChest = 0 
+    UsedAbdomen = 0
+    UsedSpO2 = 0
+    UsedNasal = 0
+    UsedCepap = 0
 
-    # Datos = pd.DataFrame(columns=['File', 'Channel', 'Sampling_Frequency', 'Duration_sec'])
-    lista_dir = os.listdir(datapath)
-    results = []
+    data = []
+    original_labels = list(physiological_data.keys())
 
-    for file in lista_dir:
-        # Cargar el archivo (sustituye por tu ruta real)
-        edf = helper_code.edfio.read_edf(os.path.join(datapath, file))
+    for label in original_labels:
+        fs = physiological_fs[label]
+        sig = physiological_data[label]
+        if fs != 25:
+            duration = len(sig) / fs
+            time_original = np.linspace(0, duration, len(sig))
+            num_samples_target = int(duration * 25 )
+            time_target = np.linspace(0, duration, num_samples_target)
+            data = np.interp(time_target, time_original, sig)
+            fs = 25  # Update fs to the target sampling frequency after resampling
+        else:
+            data = sig
 
-        id = file[9:-10]  # Asumiendo que el ID es el nombre del archivo sin la extensión
-        
-        selResp = []
-        labels = []
-        data = []
+        # Check nan in sig.data
+        if np.isnan(sig).any():
+            print(f"Warning: NaN values found in signal data for {label}. Filling NaNs with zeros.")
+            data = np.nan_to_num(data)
 
-        HayResp = False
-        for i, sig in enumerate(edf.signals):
-            for index in selectResp.index:
-                if sig.label.lower() in selectResp['Channel_Names'][index].lower():
-                    print(f"Canal seleccionado: {sig.label}")
-                    selResp.append([i,sig])
-                    labels.append(sig.label)
-                    HayResp = True
-                    # plot en plotly la señal
-                    go.Figure(data=go.Scattergl(x=np.arange(len(sig.data))/sig.sampling_frequency, y=sig.data, mode='lines', name=sig.label)).update_layout(title=f"Señal de {sig.label} - Archivo: {file}", xaxis_title="Tiempo (s)", yaxis_title="Amplitud").show()
-                    # px.line(x=np.arange(len(sig.data))/sig.sampling_frequency, y=sig.data, title=f"Señal de {sig.label} - Archivo: {file}").show()
-                    break
-        
-        if HayResp:
-            for i, (idx, sig) in enumerate(selResp):
-                print(f"Archivo: {file}, Canal: {sig.label}, Frecuencia de muestreo: {sig.sampling_frequency} Hz, Duración: {len(sig.data)/sig.sampling_frequency:.2f} segundos")
-                fs = sig.sampling_frequency
-
-                if fs != 25:
-                    duration = len(sig.data) / fs
-                    time_original = np.linspace(0, duration, len(sig.data))
-                    num_samples_target = int(duration * 25 )
-                    time_target = np.linspace(0, duration, num_samples_target)
-                    data = np.interp(time_target, time_original, sig.data)
-                    fs = 25  # Update fs to the target sampling frequency after resampling
+        name = ""
+        if label.lower() not in selectResp['Channel_Names'][34].lower():
+            d = Resp_features.peakedness_application(data, stage=label, plotflag = False, subjet =label)
+            if label.lower() in selectResp['Channel_Names'][28].lower():
+                name = "Chest"
+                # EFFORT RESPIRATORY Chest
+            elif label.lower() in selectResp['Channel_Names'][29].lower():
+                # EFFORT RESPIRATORY Abdomen
+                name = "Abdomen"
+            elif label.lower() in selectResp['Channel_Names'][30].lower():
+                # RESPIRATORY NASAL
+                name = "Nasal"
+            elif label.lower() in selectResp['Channel_Names'][31].lower():
+                # RESPIRATORY FLOW
+                name = "Flow"
+            elif label.lower() in selectResp['Channel_Names'][32].lower():
+                # CEPAP
+                if np.all(data == 0) or np.std(data) < 5:
+                    print(f"Warning: All values in the signal data for {label} are zero. Skipping feature extraction for this channel.")
                 else:
-                    data = sig.data
-                    time_new = np.linspace(0, len(sig.data) / fs, len(sig.data))
+                    name = ""
+            elif label.lower() in selectResp['Channel_Names'][33].lower():
+                # CEPAP
+                name = ""
+            
+            if name != "":
+                DSinNan = d[0][~np.isnan(d[0])]  # Eliminar NaN antes de calcular min y max
+                if len(DSinNan) != 0:
+                    maximo = DSinNan.max()
+                    minimo = DSinNan.min()
+                    media = np.mean(DSinNan)
+                    mediana = np.median(DSinNan)
+                    std = DSinNan.std()
+                    write = False
+                    if name == "Nasal" and UsedNasal< d[-1]:
+                        UsedNasal = d[-1]
+                        write = True
+                    elif name == "Chest" and UsedChest< d[-1]:
+                        UsedChest = d[-1]
+                        write = True
+                    elif name == "Abdomen" and UsedAbdomen< d[-1]:
+                        UsedAbdomen = d[-1]
+                        write = True
+                    elif name == "Flow" and UsedFlow< d[-1]:
+                        UsedFlow = d[-1]
+                        write = True
+                    elif name == "SpO2" and UsedSpO2< d[-1]:
+                        UsedSpO2 = d[-1]
+                        write = True
+                    elif name == "CEPAP" and UsedCepap < d[-1]:
+                        UsedCepap = d[-1]
+                        write = True
+                    if write:
+                        resultados.update({
+                            name+"_Peakedness_Max": maximo,
+                            name+"_Peakedness_Min": minimo,
+                            name+"_Peakedness_Mean": media,
+                            name+"_Peakedness_Median": mediana,
+                            name+"_Peakedness_Std": std
+                        })  
+        
+        elif label.lower() in selectResp['Channel_Names'][34].lower():
+            #O2 SATURATION   
+            if np.max(data) < 2:
+                data = np.round((data/1.055)*100)
 
-                # Check nan in sig.data
-                if np.isnan(sig.data).any():
-                    print(f"Warning: NaN values found in signal data for {sig.label}. Filling NaNs with zeros.")
-                    data = np.nan_to_num(data)
+            lim = 0.7
+            # Quitar los valores por debajo de lim y sus 10 valores anteriores y posteriores para quedarnos solo con los eventos de desaturación
+            dataReal = data.copy()
+            for i in range(len(data)):
+                if data[i] < lim:
+                    start = int(max(0, i-fs*2))
+                    end = int(min(len(data), i+fs*2))
+                    dataReal[start:end] = np.nan  # Marcar los valores por debajo del límite y sus alrededores como NaN
 
-                # if sig.label not in ["SpO2", "SaO2", "OSAT", "O2SAT", "O2 SAT", "O2-SAT", "O2-SATURATION"]:
-                #     fil = EEG_functions.butter_bandpass_filter(data, lowcut=0.01, highcut=4, fs=fs, order=4)
-                #     # norm = (fil-np.mean(fil))/np.std(fil)
-                #     data.append(fil)  # Restar la media para centrar la señal
-                
-                if sig.label.lower() in selectResp['Channel_Names'][28].lower() or sig.label.lower() in selectResp['Channel_Names'][29].lower():
-                    # EFFORT RESPIRATORY
-                elif sig.label.lower() in selectResp['Channel_Names'][30].lower() or sig.label.lower() in selectResp['Channel_Names'][31].lower():
-                    # RESPIRATORY Flujo
-                    fil = EEG_functions.butter_bandpass_filter(data, lowcut=0.01, highcut=4, fs=fs, order=4)
-                    Resp_features.peakedness_application(fil, stage=sig.label, plotflag = True, subjet =1) 
-                elif sig.label.lower() in selectResp['Channel_Names'][32].lower() or sig.label.lower() in selectResp['Channel_Names'][33].lower():
-                    # CEPAP
-                elif sig.label.lower() in selectResp['Channel_Names'][34].lower():
-                    #O2 SATURATION
+            CET90 = dataReal[dataReal < 90]
+            # CET90SinNan = CET90[~np.isnan(CET90)]  # Eliminar NaN antes de calcular min y max
+            CET90 = len(CET90)/len(data)
+            dataRealSinNan = dataReal[~np.isnan(dataReal)]  # Eliminar NaN antes de calcular min y max
+            if len(dataRealSinNan)>0:
+                maximo = dataRealSinNan.max()
+                minimo = dataRealSinNan.min()
+                std = dataRealSinNan.std()
+                media = dataRealSinNan.mean()
+                ODI_mean, ODI_deepness = Resp_features.ODI_application(dataReal, fs, plotflag=False, subjet=1)
 
-
-
-                # time_dt = pd.to_datetime(time_new, unit='s')    
-                # # Plot raw and filtered signals
-                # fig = make_subplots(specs=[[{"secondary_y": True}]])
-                # fig.add_trace(go.Scattergl(x=time_dt[::10], y=data[::10], name=sig.label, mode='lines'),secondary_y=False,row=1, col=1)
-                # fig.add_trace(go.Scattergl(x=time_dt[::10], y=fil[::10], name=f"Normalized {sig.label}", mode='lines'), secondary_y=True,row=1, col=1)
-                # fig.update_yaxes(title_text="Amplitud Original (uV)", secondary_y=False)
-                # fig.update_yaxes(title_text="Valor Normalizado (Z-score)", secondary_y=True)
-                # # update x axis to make time format
-                # fig.update_xaxes(
-                #     tickformat="%H:%M:%S", # Formato de hora:minuto:segundo
-                #     row=1, col=1
-                # )
-                # fig.show()
-
-                #  Plot spectrogram of raw and filtered signals
-                # fig = make_subplots(specs=[[{"secondary_y": True}]])
-                # fig.add_trace(go.Scattergl(x=time_dt[::10], y=data[::10], name=sig.label, mode='lines'),secondary_y=False,row=1, col=1)
-                # fig.add_trace(go.Scattergl(x=time_dt[::10], y=fil[::10], name=f"Normalized {sig.label}", mode='lines'), secondary_y=True,row=1, col=1)
-                # fig.update_yaxes(title_text="Amplitud Original (uV)", secondary_y=False)
-
+                resultados.update({"SpO2_Max": maximo,
+                    "SpO2_Min": minimo,
+                    "SpO2_Mean": media,
+                    "SpO2_Std": std,
+                    "CET90": CET90,
+                    "ODI_Mean": ODI_mean,
+                    "ODI_deepness": ODI_deepness,
+                })
+    
+    return pd.DataFrame(resultados)
