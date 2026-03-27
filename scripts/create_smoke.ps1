@@ -10,7 +10,7 @@
 $FULL_DATA_PATH = "data/training_set"  # <-- CHANGE THIS IF NEEDED
 
 $SMOKE_PATH = "data/training_smoke"
-$N_RECORDS = 10
+$N_RECORDS = 5
 
 Write-Host "Creating smoke dataset..."
 Write-Host "Source: $FULL_DATA_PATH"

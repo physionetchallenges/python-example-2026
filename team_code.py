@@ -22,8 +22,8 @@ import sys
 from tqdm import tqdm
 
 from helper_code import *
-from src.resp_processing import processResp
-from src.eeg_processing import processEEG
+from src.resp_processing import RESP_FEATURE_LENGTH, processResp
+from src.eeg_processing import EEG_FEATURE_LENGTH, processEEG
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -67,6 +67,50 @@ def get_rename_rules(csv_path):
     return rename_rules
 
 
+def _coerce_feature_vector(features):
+    vector = np.asarray(features, dtype=np.float32).reshape(-1)
+    return np.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _extract_optional_features(extractor, expected_length, *args, **kwargs):
+    vector = _coerce_feature_vector(extractor(*args, **kwargs))
+    if vector.size != expected_length:
+        raise ValueError(
+            f"{extractor.__name__} returned {vector.size} features; expected {expected_length}."
+        )
+    return vector
+
+
+def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
+    base_features = _coerce_feature_vector(
+        extract_physiological_features(physiological_data, physiological_fs, csv_path=csv_path)
+    )
+
+    try:
+        resp_features = _extract_optional_features(
+            processResp,
+            RESP_FEATURE_LENGTH,
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path,
+        )
+    except Exception:
+        resp_features = np.zeros(RESP_FEATURE_LENGTH, dtype=np.float32)
+
+    try:
+        eeg_features = _extract_optional_features(
+            processEEG,
+            EEG_FEATURE_LENGTH,
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path,
+        )
+    except Exception:
+        eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
+
+    return np.hstack([base_features, resp_features, eeg_features]).astype(np.float32)
+
+
 def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
     patient_id = record[HEADERS['bids_folder']]
     site_id = record[HEADERS['site_id']]
@@ -86,30 +130,22 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
             return patient_id, None, None, f"Missing physiological data for {patient_id}. Skipping..."
 
         physiological_data, physiological_fs = load_signal_data(physiological_data_file)
-        physiological_features = extract_physiological_features(
+        physiological_features = extract_extended_physiological_features(
             physiological_data,
             physiological_fs,
             csv_path=csv_path
         )
-        resp_features = processResp(
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path
-        )
-        eeg_features = processEEG(
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path
-        )
-        physiological_features = np.concatenate([physiological_features, resp_features, eeg_features], axis = 1)
         algorithmic_annotations_file = os.path.join(
             data_folder,
             ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
             site_id,
             f"{patient_id}_ses-{session_id}_caisr_annotations.edf"
         )
-        algorithmic_annotations, algorithmic_fs = load_signal_data(algorithmic_annotations_file)
-        algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
+        if os.path.exists(algorithmic_annotations_file):
+            algorithmic_annotations, _ = load_signal_data(algorithmic_annotations_file)
+            algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
+        else:
+            algorithmic_features = np.zeros(12, dtype=np.float32)
 
         label = diagnosis_cache.get(patient_id)
 
@@ -215,6 +251,9 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     features = np.asarray(features, dtype=np.float32)
     labels = np.asarray(labels, dtype=bool)
 
+    if features.size == 0 or features.ndim != 2 or features.shape[0] == 0:
+        raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
+
     # Train the models on the features.
     if verbose:
         print('Training the model on the data...')
@@ -294,10 +333,9 @@ def run_model(model, record, data_folder, verbose):
     if os.path.exists(phys_file):
         phys_data, phys_fs = load_signal_data(phys_file)
         # Ensure csv_path is accessible or defined
-        physiological_features = extract_physiological_features(phys_data, phys_fs)
+        physiological_features = extract_extended_physiological_features(phys_data, phys_fs)
     else:
-        # Fallback to zeros if file is missing (length 49)
-        physiological_features = np.zeros(49)
+        physiological_features = np.zeros(49 + RESP_FEATURE_LENGTH + EEG_FEATURE_LENGTH, dtype=np.float32)
 
     # Load Algorithmic Annotations
     algo_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
@@ -306,7 +344,7 @@ def run_model(model, record, data_folder, verbose):
         algorithmic_features = extract_algorithmic_annotations_features(algo_data)
     else:
         # Fallback to zeros (length 12)
-        algorithmic_features = np.zeros(12)
+        algorithmic_features = np.zeros(12, dtype=np.float32)
 
     features = np.hstack([demographic_features, physiological_features, algorithmic_features]).reshape(1, -1)
 
