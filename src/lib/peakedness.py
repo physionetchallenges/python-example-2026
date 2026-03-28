@@ -116,7 +116,7 @@ def extract_interval( x, t, int_ini, int_end ):
 
     return [ x_int, t_int ]
 
-def normalizar_PSD( PSD, f = 'default', rango = 'default'):
+def normalizar_PSD( PSD, f = None, rango = None):
     # NORMALIZAR_PSD   Normaliza una densidad espectral de potencia en el rango
     #                  de frecuencias requerido.
     # 
@@ -131,17 +131,17 @@ def normalizar_PSD( PSD, f = 'default', rango = 'default'):
     #          f_PSD_norm = Vector de frecuencias para PSD_norm
     #          factor_norm = Factor de normalizaciï¿½n utilizado
 
-    if f == 'default':
+    if f is None:
         f = np.arange(0,PSD.shape[0]) / PSD.shape[0] - 1/2
     
-    if rango == 'default':
+    if rango is None:
         rango = [f[0], f[-1]]
     
 
     # Seleccionar rango de interï¿½s:
     f_PSD_norm = f[(f>=rango[0]) & (f<=rango[1])]
     PSD = PSD[(f>=rango[0]) & (f<=rango[1])]
-    if ~f_PSD_norm.any(): # El vector de frecuencias no estaba ordenado
+    if not np.any(f_PSD_norm): # El vector de frecuencias no estaba ordenado
         print('El vector de frecuencias debe estar ordenado de forma ascendente');
     
 
@@ -257,17 +257,20 @@ def init_module(kk,vars,param, plotflag):
             
             # Cost function for deviation from previous fr and maximum power
             max_s = np.max(S)
-            C_a = 1-_safe_ratio(np.transpose(pk), max_s, default=np.zeros_like(pk, dtype=float))
+            if np.isfinite(max_s) and max_s != 0:
+                C_a = 1 - (np.transpose(pk) / max_s)
+            else:
+                C_a = np.ones_like(pk, dtype=float)
             fr_prev = vars["bar_fr"][np.max(kk,0)]
             C_f = abs(f[j_pk[:]]-fr_prev)/(2*d)
             # C_f = abs(f(i_pk(:))-fr_prev)/(Omega_r(2)-Omega(1));
             
             C = C_a +C_f
-            try:
+            if C.size > 0:
                 j_min = C.argmin()
                 fj = j_pk[j_min]
                 vars["bar_fr"][kk] = f[fj]
-            except:
+            else:
                 vars["bar_fr"][kk] = 0
             # Save in vars
             # vars["bar_fr"][kk] = f[fj]
@@ -592,11 +595,8 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
     if np.isnan(vars["hat_fr"][0]) and int_e.shape[0]>1:
         
         int_e = int_e[1:]
-    try:
-        if (int_e[0]-int_b[0])[0] < 0:
-            int_e = int_e[1:]
-    except:
-        print("int vacio")
+    if int_b.size > 0 and int_e.size > 0 and (int_e[0]-int_b[0])[0] < 0:
+        int_e = int_e[1:]
 
     int_small = (int_e-int_b)<=(N_k-1)
 

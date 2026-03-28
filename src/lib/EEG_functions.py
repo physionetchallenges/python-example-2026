@@ -5,17 +5,27 @@ import pandas as pd
 from scipy import signal
 from scipy.stats import kurtosis, entropy
 
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-except ModuleNotFoundError:
-    go = None
-    make_subplots = None
+# try:
+#     import plotly.graph_objects as go
+#     from plotly.subplots import make_subplots
+# except ModuleNotFoundError:
+#     go = None
+#     make_subplots = None
 
-try:
-    import matplotlib.pyplot as plt
-except ModuleNotFoundError:
-    plt = None
+# try:
+#     import matplotlib.pyplot as plt
+# except ModuleNotFoundError:
+#     plt = None
+
+def _safe_sqrt_variance_ratio(numerator_signal, denominator_signal):
+    numerator_var = np.var(numerator_signal)
+    denominator_var = np.var(denominator_signal)
+    if denominator_var <= 0 or not np.isfinite(denominator_var):
+        return 0.0
+    ratio = numerator_var / denominator_var
+    if ratio <= 0 or not np.isfinite(ratio):
+        return 0.0
+    return float(np.sqrt(ratio))
 
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs  # Frecuencia de Nyquist
@@ -40,66 +50,66 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
     y = filtfilt(b, a, data) 
     return y
 
-def plot_EEG(df, columns, fs = 200):
-    if go is None or make_subplots is None:
-        raise ModuleNotFoundError("plotly is required for plot_EEG")
+# def plot_EEG(df, columns, fs = 200):
+#     if go is None or make_subplots is None:
+#         raise ModuleNotFoundError("plotly is required for plot_EEG")
 
-    fig = make_subplots(rows=len(columns), cols=1, 
-                shared_xaxes=True, 
-                vertical_spacing=0.02,
-                subplot_titles=columns)
-    limit = int(3000 * fs) 
-    x = np.arange(df[0].shape[0]) / fs  # Asumiendo fs=100Hz, ajusta si es diferente
-    downsample = 10  # Factor de downsampling para mejorar rendimiento (ajusta según necesidad)
-    for i, col in enumerate(columns):
-        fig.add_trace(
-            go.Scattergl(x=x[:limit:downsample], y=df[i][:limit:downsample], name=col, mode='lines'),
-            row=i+1, col=1
-        )
-    fig.update_layout(
-        height=900, 
-        title_text="Polisomnografía - Canales EEG",
-        showlegend=False,
-        template="plotly_white"
-    )
-    fig.update_xaxes(title_text="Tiempo (segundos)", row=len(columns), col=1)
-    fig.show()
+#     fig = make_subplots(rows=len(columns), cols=1, 
+#                 shared_xaxes=True, 
+#                 vertical_spacing=0.02,
+#                 subplot_titles=columns)
+#     limit = int(3000 * fs) 
+#     x = np.arange(df[0].shape[0]) / fs  # Asumiendo fs=100Hz, ajusta si es diferente
+#     downsample = 10  # Factor de downsampling para mejorar rendimiento (ajusta según necesidad)
+#     for i, col in enumerate(columns):
+#         fig.add_trace(
+#             go.Scattergl(x=x[:limit:downsample], y=df[i][:limit:downsample], name=col, mode='lines'),
+#             row=i+1, col=1
+#         )
+#     fig.update_layout(
+#         height=900, 
+#         title_text="Polisomnografía - Canales EEG",
+#         showlegend=False,
+#         template="plotly_white"
+#     )
+#     fig.update_xaxes(title_text="Tiempo (segundos)", row=len(columns), col=1)
+#     fig.show()
       
-def plot_EEG_sel(sel, name = "EEG_plot_raw.html"):
-    if go is None or make_subplots is None:
-        raise ModuleNotFoundError("plotly is required for plot_EEG_sel")
+# def plot_EEG_sel(sel, name = "EEG_plot_raw.html"):
+#     if go is None or make_subplots is None:
+#         raise ModuleNotFoundError("plotly is required for plot_EEG_sel")
 
-    fig = make_subplots(rows=len(sel), cols=1, 
-                    shared_xaxes=True, 
-                    vertical_spacing=0.02,
-                    subplot_titles=[ch[1].label for ch in sel])
+#     fig = make_subplots(rows=len(sel), cols=1, 
+#                     shared_xaxes=True, 
+#                     vertical_spacing=0.02,
+#                     subplot_titles=[ch[1].label for ch in sel])
 
-    for i, (idx, sig) in enumerate(sel):
-        # Crear eje de tiempo en segundos
-        fs = sig.sampling_frequency
-        time = np.linspace(0, len(sig.data) / fs, len(sig.data))
+#     for i, (idx, sig) in enumerate(sel):
+#         # Crear eje de tiempo en segundos
+#         fs = sig.sampling_frequency
+#         time = np.linspace(0, len(sig.data) / fs, len(sig.data))
         
-        # Añadir traza (solo mostramos los primeros 30s por defecto para no saturar el navegador)
-        # Puedes quitar el slice [:int(30*fs)] para ver todo, pero cuidado con el rendimiento
-        limit = int(3000 * fs) 
-        # limit = len(sig.data) if limit > len(sig.data) else limit
-        # limit = len(sig.data)
-        # downsample = 10  # Factor de downsampling para mejorar rendimiento (ajusta según necesidad)
-        fig.add_trace(
-            go.Scattergl(x=time[:limit], y=sig.data[:limit], name=sig.label, mode='lines'),
-            row=i+1, col=1
-        )
+#         # Añadir traza (solo mostramos los primeros 30s por defecto para no saturar el navegador)
+#         # Puedes quitar el slice [:int(30*fs)] para ver todo, pero cuidado con el rendimiento
+#         limit = int(3000 * fs) 
+#         # limit = len(sig.data) if limit > len(sig.data) else limit
+#         # limit = len(sig.data)
+#         # downsample = 10  # Factor de downsampling para mejorar rendimiento (ajusta según necesidad)
+#         fig.add_trace(
+#             go.Scattergl(x=time[:limit], y=sig.data[:limit], name=sig.label, mode='lines'),
+#             row=i+1, col=1
+#         )
 
-    fig.update_layout(
-        height=900, 
-        title_text="Polisomnografía - Canales EEG",
-        showlegend=False,
-        template="plotly_white"
-    )
+#     fig.update_layout(
+#         height=900, 
+#         title_text="Polisomnografía - Canales EEG",
+#         showlegend=False,
+#         template="plotly_white"
+#     )
 
-    fig.update_xaxes(title_text="Tiempo (segundos)", row=len(sel), col=1)
-    fig.write_html(f"graphs/{name}.html")  # Guardar como HTML para visualización interactiva
-    # fig.show()
+#     fig.update_xaxes(title_text="Tiempo (segundos)", row=len(sel), col=1)
+#     fig.write_html(f"graphs/{name}.html")  # Guardar como HTML para visualización interactiva
+#     # fig.show()
 
 def filtering_and_normalization(sig, sig_fs):
     b, a = signal.butter(4, 0.3, btype='highpass', fs=sig_fs)
@@ -249,10 +259,10 @@ def extract_band_powers(epochs, fs, win_len = 2):
         features.append(epoch_features)
 
         diff = np.diff(epoch)
-        mobility = np.sqrt(np.var(diff) / np.var(epoch))
+        mobility = _safe_sqrt_variance_ratio(diff, epoch)
         # 2. Complejidad de Hjorth: Qué tan similar es la señal a una onda senoidal
         diff2 = np.diff(diff)
-        mobility_diff = np.sqrt(np.var(diff2) / np.var(diff))
+        mobility_diff = _safe_sqrt_variance_ratio(diff2, diff)
         complexity = mobility_diff / mobility if mobility > 0 else 0
         complexities.append({'Hjorth_Mobility': mobility, 'Hjorth_Complexity': complexity})
 
