@@ -17,7 +17,7 @@ def openECG(physiological_data_file, patient_id):
         # Check if any ECG keyword is inside the label
         if any(keyword in label_clean for keyword in ecg_keywords):
             idx = i
-            break  # ✅ first ECG channel only
+            break  #first ECG channel only
 
     if idx is None:
         raise ValueError("No ECG channel found")
