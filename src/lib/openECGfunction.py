@@ -1,6 +1,21 @@
 import pyedflib
 from ..main_ECG_ver2 import ECGprocessing
 import pandas as pd
+
+ECG_FEATURE_NAMES = [
+        "ID",
+        "mNNmed", "mNNstd",
+        "PIP_med", "PIP_std",
+        "PNNLS_med", "PNNLS_std",
+        "PNNSS_med", "PNNSS_std",
+        "AVNN_med", "AVNN_std",
+        "SDNN_med", "SDNN_std",
+        "RMSSD_med", "RMSSD_std",
+        "HF_med", "HF_std",
+        "ECTOPIC_med", "ECTOPIC_std",
+]
+ECG_FEATURE_LENGTH = len(ECG_FEATURE_NAMES)
+
 def openECG(physiological_data_file, patient_id):
 
     f = pyedflib.EdfReader(physiological_data_file)
