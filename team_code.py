@@ -24,12 +24,7 @@ from tqdm import tqdm
 from helper_code import *
 from src.resp_processing import RESP_FEATURE_LENGTH, processResp
 from src.eeg_processing import EEG_FEATURE_LENGTH, processEEG
-<<<<<<< HEAD
 from src.ecg_processing import ECG_FEATURE_LENGTH, processECG
-=======
-from src.lib.openECGfunction import ECG_FEATURE_LENGTH,openECG
-
->>>>>>> 19149a208ece438e8ba5283bcaa21c62eb2b7d27
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
