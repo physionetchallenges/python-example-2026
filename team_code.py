@@ -24,7 +24,12 @@ from tqdm import tqdm
 from helper_code import *
 from src.resp_processing import RESP_FEATURE_LENGTH, processResp
 from src.eeg_processing import EEG_FEATURE_LENGTH, processEEG
+<<<<<<< HEAD
 from src.ecg_processing import ECG_FEATURE_LENGTH, processECG
+=======
+from src.lib.openECGfunction import ECG_FEATURE_LENGTH,openECG
+
+>>>>>>> 19149a208ece438e8ba5283bcaa21c62eb2b7d27
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -108,7 +113,19 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
         )
     except Exception:
         eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
+        
+    try:
+        ecg_features = _extract_optional_features(
+            openECG,
+            ECG_FEATURE_LENGTH,
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path,
+        )
+    except Exception:
+        ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
 
+<<<<<<< HEAD
     try:
         ecg_features = _extract_optional_features(
             processECG,
@@ -120,6 +137,8 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
     except Exception:
        ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
 
+=======
+>>>>>>> 19149a208ece438e8ba5283bcaa21c62eb2b7d27
     return np.hstack([base_features, resp_features, eeg_features, ecg_features]).astype(np.float32)
 
 
