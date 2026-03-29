@@ -24,6 +24,7 @@ from tqdm import tqdm
 from helper_code import *
 from src.resp_processing import RESP_FEATURE_LENGTH, processResp
 from src.eeg_processing import EEG_FEATURE_LENGTH, processEEG
+from src.ecg_processing import ECG_FEATURE_LENGTH, processECG
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -108,7 +109,18 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
     except Exception:
         eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
 
-    return np.hstack([base_features, resp_features, eeg_features]).astype(np.float32)
+    try:
+        ecg_features = _extract_optional_features(
+            processECG,
+            ECG_FEATURE_LENGTH,
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path,
+        )
+    except Exception:
+       ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
+
+    return np.hstack([base_features, resp_features, eeg_features, ecg_features]).astype(np.float32)
 
 
 def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):

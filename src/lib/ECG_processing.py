@@ -1,13 +1,13 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, resample
-from .lib.pan_tompkins import pan_tompkin
-from .lib.compute_hrv_hrf import compute_HRV_HRF
-from .lib.interpolate_NN import interpolate_NN_pchip
-from .lib.remove_ectopic_beat import remove_ectopic_beats
-def ECGprocessing(ecg_signal, fs, patient_id):
+from .pan_tompkins import pan_tompkin
+from .compute_hrv_hrf import compute_HRV_HRF
+from .interpolate_NN import interpolate_NN_pchip
+from .remove_ectopic_beat import remove_ectopic_beats
 
-    all_results = pd.DataFrame()
+
+def ECGprocessing(ecg_signal, fs, ECG_FEATURE_LENGTH):
 
     ecg_signal = ecg_signal - np.mean(ecg_signal)
 
@@ -110,21 +110,16 @@ def ECGprocessing(ecg_signal, fs, patient_id):
         # ===============================
         res = compute_HRV_HRF(NN, fs)
 
-        meanNN = np.mean(NN)
-
         HRV_all.append([
-            meanNN,
             res["PIP"], res["PNNLS"], res["PNNSS"],
             res["AVNN"], res["SDNN"], res["RMSSD"], res["HF"],
             ectopic_perc
         ])
-
-    # ===============================
-    # SUBJECT-LEVEL METRICS
-    # ===============================
+# ===============================
+# SUBJECT-LEVEL METRICS
+# ===============================
     if len(HRV_all) == 0:
-        print("No valid windows.")
-        return None
+        return np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
 
     HRV_all = np.array(HRV_all)
 
@@ -132,21 +127,17 @@ def ECGprocessing(ecg_signal, fs, patient_id):
     std_vals = np.nanstd(HRV_all, axis=0)
 
     # ===============================
-    # SAVE RESULTS (DataFrame row)
+    # BUILD FIXED FEATURE VECTOR
     # ===============================
-    row = pd.DataFrame([{
-        "ID": patient_id,
-        "mNNmed": median_vals[0], "mNNstd": std_vals[0],
-        "PIP_med": median_vals[1], "PIP_std": std_vals[1],
-        "PNNLS_med": median_vals[2], "PNNLS_std": std_vals[2],
-        "PNNSS_med": median_vals[3], "PNNSS_std": std_vals[3],
-        "AVNN_med": median_vals[4], "AVNN_std": std_vals[4],
-        "SDNN_med": median_vals[5], "SDNN_std": std_vals[5],
-        "RMSSD_med": median_vals[6], "RMSSD_std": std_vals[6],
-        "HF_med": median_vals[7], "HF_std": std_vals[7],
-        "ECTOPIC_med": median_vals[8], "ECTOPIC_std": std_vals[8],
-    }])
+    features = np.array([
+        median_vals[0], std_vals[0],  # PIP
+        median_vals[1], std_vals[1],  # PNNLS
+        median_vals[2], std_vals[2],  # PNNSS
+        median_vals[3], std_vals[3],  # AVNN
+        median_vals[4], std_vals[4],  # SDNN
+        median_vals[5], std_vals[5],  # RMSSD
+        median_vals[6], std_vals[6],  # HF
+        median_vals[7], std_vals[7],  # ECTOPIC
+    ], dtype=np.float32)
 
-    all_results = pd.concat([all_results, row], ignore_index=True)
-
-    return all_results
+    return features
