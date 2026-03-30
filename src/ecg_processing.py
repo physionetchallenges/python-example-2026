@@ -1,4 +1,3 @@
-import pyedflib
 from .lib.ECG_processing import ECGprocessing
 import pandas as pd
 import numpy as np
