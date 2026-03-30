@@ -18,7 +18,7 @@ import hashlib
 import pandas as pd
 import re
 from concurrent.futures import ThreadPoolExecutor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from xgboost import XGBClassifier
 import sys
 from tqdm import tqdm
 
@@ -44,11 +44,9 @@ PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
 RENAME_RULES_CACHE = {}
 MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
-FEATURE_CACHE_FOLDER_NAME = '.feature_cache'
-BASE_PHYSIOLOGICAL_FEATURE_LENGTH = 49
+FEATURE_CACHE_FOLDER_NAME = '.feature_cache_xgb_v3'
 TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH = (
-    BASE_PHYSIOLOGICAL_FEATURE_LENGTH
-    + RESP_FEATURE_LENGTH
+    RESP_FEATURE_LENGTH
     + EEG_FEATURE_LENGTH
     + ECG_FEATURE_LENGTH
 )
@@ -151,7 +149,7 @@ def _save_cached_feature_vector(cache_file, feature_vector):
 
 def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_id, session_id, csv_path, require_physiological_data):
     demographic_features = extract_demographic_features(patient_data)
-    physiological_data_file, algorithmic_annotations_file = _get_record_file_paths(
+    physiological_data_file, _ = _get_record_file_paths(
         data_folder,
         site_id,
         patient_id,
@@ -170,13 +168,7 @@ def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_i
     else:
         physiological_features = np.zeros(TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH, dtype=np.float32)
 
-    if os.path.exists(algorithmic_annotations_file):
-        algorithmic_annotations, _ = load_signal_data(algorithmic_annotations_file)
-        algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
-    else:
-        algorithmic_features = np.zeros(12, dtype=np.float32)
-
-    return np.hstack([demographic_features, physiological_features, algorithmic_features]).astype(np.float32)
+    return np.hstack([demographic_features, physiological_features]).astype(np.float32)
 
 
 def get_or_create_record_feature_vector(record, data_folder, patient_data, csv_path=DEFAULT_CSV_PATH, require_physiological_data=True):
@@ -202,10 +194,6 @@ def get_or_create_record_feature_vector(record, data_folder, patient_data, csv_p
 
 
 def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
-    base_features = _coerce_feature_vector(
-        extract_physiological_features(physiological_data, physiological_fs, csv_path=csv_path)
-    )
-
     try:
         resp_features = _extract_optional_features(
             processResp,
@@ -227,7 +215,6 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
         )
     except Exception:
         eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
-        
 
     try:
         ecg_features = _extract_optional_features(
@@ -238,9 +225,9 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
             csv_path=csv_path,
         )
     except Exception:
-       ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
+        ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
 
-    return np.hstack([base_features, resp_features, eeg_features, ecg_features]).astype(np.float32)
+    return np.hstack([resp_features, eeg_features, ecg_features]).astype(np.float32)
 
 
 def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
@@ -360,7 +347,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
         pbar.close()
 
     features = np.asarray(features, dtype=np.float32)
-    labels = np.asarray(labels, dtype=bool)
+    labels = np.asarray(labels, dtype=np.int32)
 
     if features.size == 0 or features.ndim != 2 or features.shape[0] == 0:
         raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
@@ -369,16 +356,21 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose:
         print('Training the model on the data...')
 
-    # This very simple model trains a random forest model with very simple features.
+    neg = int(np.sum(labels == 0))
+    pos = int(np.sum(labels == 1))
+    scale_pos_weight = (neg / pos) if pos > 0 else 1.0
 
-    # Define the parameters for the random forest classifier and regressor.
-    n_estimators = 12  # Number of trees in the forest.
-    max_leaf_nodes = 34  # Maximum number of leaf nodes in each tree.
-    random_state = 56  # Random state; set for reproducibility.
-
-    # Fit the model.
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(features, labels)
+    model = XGBClassifier(
+        scale_pos_weight=scale_pos_weight,
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        random_state=42,
+        eval_metric='auc',
+        tree_method='hist',
+    )
+    model.fit(features, labels)
 
     # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
