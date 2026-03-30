@@ -1,10 +1,7 @@
 from .lib import Resp_features
-import sys
-import os
-import pandas as pd
 import numpy as np
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.common.channel_utils import get_cached_channel_table, normalize_channel_label, split_channel_aliases
+from src.common.signal_utils import resample_signal
 
 RESP_CHANNEL_GROUPS = ("Abdomen", "Chest", "Nasal", "Flow")
 RESP_FEATURE_NAMES = [
@@ -24,58 +21,34 @@ RESP_FEATURE_LENGTH = len(RESP_FEATURE_NAMES)
 RESP_ALIAS_GROUPS_CACHE = {}
 
 
-def _normalize_label(text):
-    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
-    return ' '.join(normalized.split())
-
-
-def _split_aliases(raw_aliases):
-    return {_normalize_label(alias) for alias in str(raw_aliases).split(';') if alias}
-
-
 def _build_resp_alias_groups(channels):
     resp_rows = channels[channels['Category'].eq('resp')].reset_index(drop=True)
     if len(resp_rows) < 7:
         return {}
     return {
-        'Abdomen': _split_aliases(resp_rows.iloc[0]['Channel_Names']),
-        'Chest': _split_aliases(resp_rows.iloc[1]['Channel_Names']),
-        'Nasal': _split_aliases(resp_rows.iloc[2]['Channel_Names']),
-        'Flow': _split_aliases(resp_rows.iloc[3]['Channel_Names']),
-        'SpO2': _split_aliases(resp_rows.iloc[6]['Channel_Names']),
+        'Abdomen': split_channel_aliases(resp_rows.iloc[0]['Channel_Names']),
+        'Chest': split_channel_aliases(resp_rows.iloc[1]['Channel_Names']),
+        'Nasal': split_channel_aliases(resp_rows.iloc[2]['Channel_Names']),
+        'Flow': split_channel_aliases(resp_rows.iloc[3]['Channel_Names']),
+        'SpO2': split_channel_aliases(resp_rows.iloc[6]['Channel_Names']),
     }
 
 
 def _get_resp_alias_groups(csv_path):
-    normalized_csv_path = os.path.abspath(csv_path)
+    channels, normalized_csv_path = get_cached_channel_table(csv_path)
     alias_groups = RESP_ALIAS_GROUPS_CACHE.get(normalized_csv_path)
     if alias_groups is None:
-        channels = pd.read_csv(normalized_csv_path)
         alias_groups = _build_resp_alias_groups(channels)
         RESP_ALIAS_GROUPS_CACHE[normalized_csv_path] = alias_groups
     return alias_groups
 
 
 def _find_resp_group(label, alias_groups):
-    normalized = _normalize_label(label)
+    normalized = normalize_channel_label(label)
     for group_name, aliases in alias_groups.items():
         if normalized in aliases:
             return group_name
     return None
-
-
-def _resample_signal(signal, fs, target_fs):
-    signal = np.asarray(signal, dtype=float)
-    if signal.size == 0:
-        return signal, target_fs
-    if fs == target_fs:
-        return signal, target_fs
-
-    duration = signal.size / fs
-    target_samples = max(1, int(round(duration * target_fs)))
-    time_original = np.linspace(0, duration, signal.size)
-    time_target = np.linspace(0, duration, target_samples)
-    return np.interp(time_target, time_original, signal), target_fs
 
 
 def _compute_resp_quality(used, hat_br):
@@ -149,7 +122,7 @@ def processResp(physiological_data, physiological_fs, csv_path):
         if group_name is None:
             continue
 
-        resampled, fs = _resample_signal(signal, physiological_fs[label], 25)
+        resampled, fs = resample_signal(signal, physiological_fs[label], 25)
         resampled = np.nan_to_num(resampled, nan=0.0, posinf=0.0, neginf=0.0)
 
         if group_name == 'SpO2':

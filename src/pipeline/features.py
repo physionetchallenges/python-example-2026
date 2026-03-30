@@ -5,9 +5,10 @@ import edfio
 import joblib
 import numpy as np
 
+from src.common.channel_utils import normalize_channel_label
 from helper_code import HEADERS, PHYSIOLOGICAL_DATA_SUBFOLDER, load_age, load_sex, load_signal_data
 from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_KEYWORDS, processECG
-from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, processEEG, _get_eeg_aliases, _normalize_label as _normalize_eeg_label
+from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, processEEG, _get_eeg_aliases
 from src.resp_processing import RESP_FEATURE_LENGTH, processResp, _get_resp_alias_groups
 
 from .config import DEFAULT_CSV_PATH, FEATURE_CACHE_FOLDER_NAME, SCRIPT_DIR, TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH
@@ -37,13 +38,6 @@ def _get_physiological_data_file(data_folder, site_id, patient_id, session_id):
         site_id,
         f"{patient_id}_ses-{session_id}.edf",
     )
-
-
-def _normalize_signal_label(text):
-    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
-    return ' '.join(normalized.split())
-
-
 def _get_required_signal_aliases(csv_path):
     normalized_csv_path = os.path.abspath(csv_path)
     required_aliases = REQUIRED_SIGNAL_ALIASES_CACHE.get(normalized_csv_path)
@@ -58,9 +52,9 @@ def _get_required_signal_aliases(csv_path):
         required_aliases.update(aliases)
 
     for channel_spec in EEG_CHANNEL_SPECS.values():
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['direct']), set()))
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['positive']), set()))
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['reference']), set()))
+        required_aliases.update(eeg_aliases.get(normalize_channel_label(channel_spec['direct']), set()))
+        required_aliases.update(eeg_aliases.get(normalize_channel_label(channel_spec['positive']), set()))
+        required_aliases.update(eeg_aliases.get(normalize_channel_label(channel_spec['reference']), set()))
 
     REQUIRED_SIGNAL_ALIASES_CACHE[normalized_csv_path] = required_aliases
     return required_aliases
@@ -78,7 +72,7 @@ def _load_required_signal_data(edf_path, csv_path):
 
     for signal in edf.signals:
         label = signal.label.lower().strip()
-        normalized_label = _normalize_signal_label(label)
+        normalized_label = normalize_channel_label(label)
         is_required_signal = normalized_label in required_aliases
         is_ecg_signal = any(keyword in normalized_label for keyword in ECG_KEYWORDS)
 

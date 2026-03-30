@@ -1,0 +1,1 @@
+"""Shared helpers for active signal-processing modules."""

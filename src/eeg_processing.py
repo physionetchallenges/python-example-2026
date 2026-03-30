@@ -1,43 +1,8 @@
-"""EEG_processing.py
-
-Este módulo contiene funciones para procesar datos EEG de los
-hospitales incluidos en el desafío CincChallenge 2026. La principal
-función definida es `MetricasHospitlal`, que recorre los archivos EDF
-correspondientes a un hospital concreto, extrae las señales EEG,
-las filtra, normaliza, crea épocas y calcula potencias de banda y
-complejidades. Los resultados se guardan en un CSV resumen por
-hospital.
-
-Características principales:
-
-- Soporta datos tanto del conjunto de entrenamiento como del
-  conjunto suplementario.
-- Selección automática de canales EEG a partir de la tabla
-  `notebooks/channel_table.csv`.
-- Creación de canales bipolares si están disponibles.
-- Filtrado de banda 0.3-35 Hz y normalización de la señal.
-- Re-muestreo a 200 Hz si fuese necesario.
-- Cálculo de potencias de banda y complejidades usando
-  funciones auxiliares (`lib/EEG_functions.py`).
-- Exportación de resultados en `results_summaryEEG_{hospital}.csv`.
-
-Uso típico:
-
->>> from src.scripts.EEG_processing import MetricasHospitlal
->>> MetricasHospitlal('I0002')
-
-El módulo depende de `numpy`, `pandas`, `matplotlib`, `plotly` y de
-las utilidades definidas en `lib/helper_code` y `lib/EEG_functions`.
-"""
-import sys
-import os
 import pandas as pd
 import numpy as np
-import helper_code as helper_code
+from src.common.channel_utils import find_matching_label, get_cached_channel_table, normalize_channel_label, split_channel_aliases
+from src.common.signal_utils import resample_signal
 from .lib import EEG_functions
-
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 EEG_CHANNEL_SPECS = {
     'C3-M2': {'direct': 'c3-m2', 'positive': 'c3', 'reference': 'm2'},
@@ -101,68 +66,37 @@ EEG_FEATURE_LENGTH = len(EEG_FEATURE_NAMES)
 EEG_ALIASES_CACHE = {}
 
 
-def _normalize_label(text):
-    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
-    return ' '.join(normalized.split())
-
-
-def _split_aliases(raw_aliases):
-    return {_normalize_label(alias) for alias in str(raw_aliases).split(';') if alias}
-
-
 def _build_eeg_aliases(channels):
     alias_lookup = {}
     for _, row in channels.iterrows():
-        aliases = _split_aliases(row['Channel_Names'])
+        aliases = split_channel_aliases(row['Channel_Names'])
         if not aliases:
             continue
-        canonical_name = _normalize_label(str(row['Channel_Names']).split(';')[0])
+        canonical_name = normalize_channel_label(str(row['Channel_Names']).split(';')[0])
         alias_lookup[canonical_name] = aliases
     return alias_lookup
 
 
 def _get_eeg_aliases(csv_path):
-    normalized_csv_path = os.path.abspath(csv_path)
+    channels, normalized_csv_path = get_cached_channel_table(csv_path)
     eeg_aliases = EEG_ALIASES_CACHE.get(normalized_csv_path)
     if eeg_aliases is None:
-        channels = pd.read_csv(normalized_csv_path)
         eeg_aliases = _build_eeg_aliases(channels)
         EEG_ALIASES_CACHE[normalized_csv_path] = eeg_aliases
     return eeg_aliases
 
 
-def _resample_signal(signal, fs, target_fs):
-    signal = np.asarray(signal, dtype=float)
-    if signal.size == 0:
-        return signal, target_fs
-    if fs == target_fs:
-        return signal, target_fs
-
-    duration = signal.size / fs
-    target_samples = max(1, int(round(duration * target_fs)))
-    time_original = np.linspace(0, duration, signal.size)
-    time_target = np.linspace(0, duration, target_samples)
-    return np.interp(time_target, time_original, signal), target_fs
-
-
-def _find_matching_label(physiological_data, aliases):
-    for label in physiological_data.keys():
-        if _normalize_label(label) in aliases:
-            return label
-    return None
-
-
 def _get_channel_signal(channel_name, physiological_data, physiological_fs, eeg_aliases):
     channel_spec = EEG_CHANNEL_SPECS[channel_name]
-    direct_aliases = eeg_aliases.get(_normalize_label(channel_spec['direct']), set())
-    direct_label = _find_matching_label(physiological_data, direct_aliases)
+    direct_aliases = eeg_aliases.get(normalize_channel_label(channel_spec['direct']), set())
+    direct_label = find_matching_label(physiological_data, direct_aliases)
     if direct_label is not None and direct_label in physiological_fs:
         return np.asarray(physiological_data[direct_label], dtype=float), physiological_fs[direct_label]
 
-    positive_aliases = eeg_aliases.get(_normalize_label(channel_spec['positive']), set())
-    reference_aliases = eeg_aliases.get(_normalize_label(channel_spec['reference']), set())
-    positive_label = _find_matching_label(physiological_data, positive_aliases)
-    reference_label = _find_matching_label(physiological_data, reference_aliases)
+    positive_aliases = eeg_aliases.get(normalize_channel_label(channel_spec['positive']), set())
+    reference_aliases = eeg_aliases.get(normalize_channel_label(channel_spec['reference']), set())
+    positive_label = find_matching_label(physiological_data, positive_aliases)
+    reference_label = find_matching_label(physiological_data, reference_aliases)
     if positive_label is None or reference_label is None:
         return None, None
     if positive_label not in physiological_fs or reference_label not in physiological_fs:
@@ -186,7 +120,7 @@ def _extract_channel_metrics(signal, fs):
         return None
 
     if fs != 200:
-        signal, fs = _resample_signal(signal, fs, 200)
+        signal, fs = resample_signal(signal, fs, 200)
 
     filtered = EEG_functions.butter_bandpass_filter(signal, lowcut=0.3, highcut=35, fs=fs, order=4)
     signal_std = np.std(filtered)
@@ -244,3 +178,6 @@ def processEEG(physiological_data, physiological_fs, csv_path):
         values.append(float(channel_metrics.get(metric_name, 0.0)))
 
     return np.asarray(values, dtype=np.float32)
+
+
+_normalize_label = normalize_channel_label
