@@ -50,6 +50,7 @@ EEG_FEATURE_NAMES = [
     'EEG_Hjorth_Complexity',
 ]
 EEG_FEATURE_LENGTH = len(EEG_FEATURE_NAMES)
+EEG_ALIASES_CACHE = {}
 
 
 def _normalize_label(text):
@@ -67,6 +68,16 @@ def _build_eeg_aliases(channels):
     for _, row in eeg_rows.iterrows():
         aliases.update(_split_aliases(row['Channel_Names']))
     return aliases
+
+
+def _get_eeg_aliases(csv_path):
+    normalized_csv_path = os.path.abspath(csv_path)
+    eeg_aliases = EEG_ALIASES_CACHE.get(normalized_csv_path)
+    if eeg_aliases is None:
+        channels = pd.read_csv(normalized_csv_path)
+        eeg_aliases = _build_eeg_aliases(channels)
+        EEG_ALIASES_CACHE[normalized_csv_path] = eeg_aliases
+    return eeg_aliases
 
 
 def _resample_signal(signal, fs, target_fs):
@@ -130,8 +141,7 @@ def _extract_channel_metrics(signal, fs):
 
 
 def processEEG(physiological_data, physiological_fs, csv_path):
-    channels = pd.read_csv(csv_path)
-    eeg_aliases = _build_eeg_aliases(channels)
+    eeg_aliases = _get_eeg_aliases(csv_path)
     channel_metrics = []
 
     for label, signal in physiological_data.items():

@@ -111,8 +111,10 @@ def extract_interval( x, t, int_ini, int_end ):
     #          t_int = interval [int_ini, int_end] of 't'
     #          indexes = indexes corresponding to returned time interval
 
-    x_int = x[(t>=int_ini) & (t <=int_end)]
-    t_int = t[(t>=int_ini) & (t <=int_end)]
+    start_idx = np.searchsorted(t, int_ini, side='left')
+    end_idx = np.searchsorted(t, int_end, side='right')
+    x_int = x[start_idx:end_idx]
+    t_int = t[start_idx:end_idx]
 
     return [ x_int, t_int ]
 
@@ -439,6 +441,8 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
             if int_Ts_sig.shape[0] < (Tm*100)/2:
                 vars["Skl"][:, ki, ii] = np.zeros((vars["f"].shape[0]))
                 continue
+            int_Ts_sig = int_Ts_sig.astype(float, copy=False)
+            ts_has_nan = np.isnan(int_Ts_sig).any()
             # Number of Tm length subintervals
             NWm = int(np.floor(2*Ts/Tm))
             I=0
@@ -456,7 +460,7 @@ def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, 
                 [int_Tm_sig, int_Tm_t] = extract_interval(int_Ts_sig, int_Ts_t, Wm_begin, Wm_end)
                 
                 # Estimate the spectrum only for intervals without NaNs
-                if ~np.isnan((int_Ts_sig.astype(float))).any():
+                if not ts_has_nan:
                     S_i = abs(fftshift(fft(detrend(int_Tm_sig[:-1]), Nfft)))**2
                     # S_i = abs(fftshift(fft(int_Tm_sig[:-1], Nfft)))**2
                     S_i = S_i[f_ind]

@@ -21,6 +21,7 @@ RESP_FEATURE_NAMES = [
     "ODI_deepness",
 ]
 RESP_FEATURE_LENGTH = len(RESP_FEATURE_NAMES)
+RESP_ALIAS_GROUPS_CACHE = {}
 
 
 def _normalize_label(text):
@@ -43,6 +44,16 @@ def _build_resp_alias_groups(channels):
         'Flow': _split_aliases(resp_rows.iloc[3]['Channel_Names']),
         'SpO2': _split_aliases(resp_rows.iloc[6]['Channel_Names']),
     }
+
+
+def _get_resp_alias_groups(csv_path):
+    normalized_csv_path = os.path.abspath(csv_path)
+    alias_groups = RESP_ALIAS_GROUPS_CACHE.get(normalized_csv_path)
+    if alias_groups is None:
+        channels = pd.read_csv(normalized_csv_path)
+        alias_groups = _build_resp_alias_groups(channels)
+        RESP_ALIAS_GROUPS_CACHE[normalized_csv_path] = alias_groups
+    return alias_groups
 
 
 def _find_resp_group(label, alias_groups):
@@ -126,8 +137,7 @@ def _summarize_spo2(data, fs):
 
 
 def processResp(physiological_data, physiological_fs, csv_path):
-    channels = pd.read_csv(csv_path)
-    alias_groups = _build_resp_alias_groups(channels)
+    alias_groups = _get_resp_alias_groups(csv_path)
     results = {feature_name: 0.0 for feature_name in RESP_FEATURE_NAMES}
     best_quality = {group_name: -np.inf for group_name in RESP_CHANNEL_GROUPS}
 
