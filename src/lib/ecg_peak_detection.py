@@ -2,7 +2,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 
 
-def pan_tompkin(ecg, fs, gr=0):
+def pan_tompkins(ecg, fs, gr=0):
 
     ecg = np.asarray(ecg).flatten()
     delay = 0

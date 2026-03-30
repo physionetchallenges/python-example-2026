@@ -4,7 +4,6 @@ from numpy.fft import fftshift
 from numpy.fft import fft
 from scipy.signal import detrend, find_peaks
 from time import time
-import os
 
 def _safe_ratio(numerator, denominator, default=0.0):
     if denominator is None or not np.isfinite(denominator) or denominator == 0:
@@ -274,21 +273,7 @@ def init_module(kk,vars,param, plotflag):
                 vars["bar_fr"][kk] = f[fj]
             else:
                 vars["bar_fr"][kk] = 0
-            # Save in vars
-            # vars["bar_fr"][kk] = f[fj]
-            
-            # if plotflag:
-            #     if plt is None:
-            #         raise ModuleNotFoundError("matplotlib is required when plotflag=True")
-            #     plt.plot(f, averS)
-            #     plt.plot(f[fj], averS[fj], '-')
-            #     plt.title('Initialization - Averaged Spectrum')
-            #     plt.show()
-
     return vars
-    # # No spectra fulfill the initialization
-    # if plotflag:
-    #     keyboard
 
 def compute_Xkl( Skl, f, bar_fr, O, ksi_p, ksi_a, d):
     # function [ Xkl ] = compute_Xkl( Skl, f, bar_fr, O, ksi_p, ksi_a, d)
@@ -371,20 +356,15 @@ def compute_fJmin( S, f, bar_fr, d):
     # Put the location in the correct perspective
     lm = peaks + (Omega[:] ==1).argmax()
 
-    # Select the frequency that corresponds to the location
-    fJ = f[lm]
-
-    # print(len(lm))
-    if len(lm) > 0:
-        # Compute the cost function for deviation from previous fr and maximum power
+    if lm.shape[0] == 1:
+        fJmin = f[lm[0]]
+    elif lm.shape[0] > 1:
+        fJ = f[lm]
         C_f = abs(fJ-bar_fr)/(2*d)
         C_a = 1-S[lm]/max(S[Omega])
-        
-        # Select the minimum cost
+
         C = C_f+C_a
         Jmin = C.argmin()
-        
-        # Store the frequency with the minimum cost
         fJmin = fJ[Jmin]
 
     return fJmin
@@ -392,16 +372,13 @@ def compute_fJmin( S, f, bar_fr, d):
 def peakednessCost(signals, ts, fs, Setup = {}, title = "", storeGraph = False, subjet =1):
 
     vars = {}
-    # Set parameters / Arrange inputs
     [ DT, Ts, Tm, Nfft, K, Omega_r, ksi_p, ksi_a, d, b, a,N_k,  plotflag , Setup]  = setParamFr(Setup)
 
-    # Start the time stamps at zero
     ts1 = ts[0]
     ts = ts-ts1
     if type(signals) == type(pd.DataFrame()):
         signals = signals.to_numpy()
 
-    # Get the number of signals
     if len(signals.shape) == 1:
         signals = np.reshape(signals, (signals.shape[0],1))
     if signals.shape[0]<signals.shape[1]:

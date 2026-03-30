@@ -1,4 +1,4 @@
-from .lib import Resp_features
+from .lib import resp_features
 import numpy as np
 from src.common.channel_utils import get_cached_channel_table, normalize_channel_label, split_channel_aliases
 from src.common.signal_utils import resample_signal
@@ -97,7 +97,7 @@ def _summarize_spo2(data, fs):
     if valid.size == 0:
         return {'CET90': cet90}
 
-    odi_mean, odi_deepness = Resp_features.ODI_application(desaturation_mask, fs, plotflag=False, subjet=1)
+    odi_mean, odi_deepness = resp_features.odi_application(desaturation_mask, fs)
     return {
         'SpO2_Max': float(np.max(valid)),
         'SpO2_Min': float(np.min(valid)),
@@ -130,11 +130,10 @@ def processResp(physiological_data, physiological_fs, csv_path):
             continue
 
         try:
-            hat_br, _, _, used = Resp_features.peakedness_application(
+            hat_br, _, _, used = resp_features.peakedness_application(
                 resampled,
                 stage=label,
-                plotflag=False,
-                subjet=label,
+                subject_id=label,
             )
         except Exception:
             continue

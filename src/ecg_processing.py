@@ -1,4 +1,4 @@
-from .lib.ECG_processing import ECGprocessing
+from .lib.ecg_features import compute_ecg_features
 import numpy as np
 from src.common.channel_utils import normalize_channel_label
 
@@ -50,7 +50,7 @@ def processECG(physiological_data, physiological_fs, csv_path):
         return results
 
     try:
-        values = ECGprocessing(ecg_signal, fs, ECG_FEATURE_LENGTH)
+        values = compute_ecg_features(ecg_signal, fs, ECG_FEATURE_LENGTH)
 
         if values is None or len(values) == 0:
             return results

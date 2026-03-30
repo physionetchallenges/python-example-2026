@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from src.common.channel_utils import find_matching_label, get_cached_channel_table, normalize_channel_label, split_channel_aliases
 from src.common.signal_utils import resample_signal
-from .lib import EEG_functions
+from .lib import eeg_features
 
 EEG_CHANNEL_SPECS = {
     'C3-M2': {'direct': 'c3-m2', 'positive': 'c3', 'reference': 'm2'},
@@ -122,24 +122,24 @@ def _extract_channel_metrics(signal, fs):
     if fs != 200:
         signal, fs = resample_signal(signal, fs, 200)
 
-    filtered = EEG_functions.butter_bandpass_filter(signal, lowcut=0.3, highcut=35, fs=fs, order=4)
+    filtered = eeg_features.butter_bandpass_filter(signal, lowcut=0.3, highcut=35, fs=fs, order=4)
     signal_std = np.std(filtered)
     if signal_std == 0 or not np.isfinite(signal_std):
         return None
 
     normalized = (filtered - np.mean(filtered)) / signal_std
-    epochs = EEG_functions.create_epochs(normalized, fs, epoch_duration=30)
+    epochs = eeg_features.create_epochs(normalized, fs, epoch_duration=30)
     if epochs.size == 0:
         return None
 
-    band_powers, complexities = EEG_functions.extract_band_powers(epochs, fs, win_len=15)
+    band_powers, complexities = eeg_features.extract_band_powers(epochs, fs, win_len=15)
     if len(band_powers) > 60:
         band_powers = band_powers.iloc[60:]
         complexities = complexities.iloc[60:]
     if band_powers.empty:
         return None
 
-    patient_profile = EEG_functions.get_patient_profile(band_powers)
+    patient_profile = eeg_features.get_patient_profile(band_powers)
     metrics = {
         str(name): float(value)
         for name, value in patient_profile.replace([np.inf, -np.inf], np.nan).fillna(0.0).items()

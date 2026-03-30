@@ -3,10 +3,10 @@
 import numpy as np
 import pandas as pd
 
-from .peakedness import peakednessCost
+from .resp_peakedness import peakednessCost
 
 
-def peakedness_application(data, stage, plotflag=False, subjet=1):
+def peakedness_application(data, stage, subject_id=1):
     fs = 25
     setup = {
         "K": 5,
@@ -14,7 +14,6 @@ def peakedness_application(data, stage, plotflag=False, subjet=1):
         "Ts": 60,
         "Tm": 20,
         "Omega_r": np.array([5, 25]) / 60,
-        "plotflag": plotflag,
         "Nfft": np.power(2, 13),
     }
     time_axis = np.arange(0, data.shape[0] / fs, 1 / fs)
@@ -29,12 +28,12 @@ def peakedness_application(data, stage, plotflag=False, subjet=1):
         setup,
         title=stage,
         storeGraph=False,
-        subjet=subjet,
+        subjet=subject_id,
     )
     return hat_br, sk_br, t_aver, used
 
 
-def ODI_application(data, fs, plotflag=True, subjet=1):
+def odi_application(data, fs):
     """Compute oxygen desaturation event rate and average event depth."""
     sp = pd.Series(data)
     if len(sp) == 0 or fs <= 0:
@@ -67,26 +66,5 @@ def ODI_application(data, fs, plotflag=True, subjet=1):
     for start, end in events:
         magnitudes.append(diff.loc[start:end].max())
     odi_deepness = np.mean(magnitudes) if magnitudes else 0.0
-
-    if plotflag:
-        try:
-            from importlib import import_module
-
-            plt = import_module('matplotlib.pyplot')
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError("matplotlib is required when plotflag=True") from exc
-
-        times = np.arange(len(sp)) / fs / 60.0
-        plt.figure(figsize=(10, 4))
-        plt.plot(times, sp.values, label='SpO2')
-        plt.plot(times, baseline.values, label='Baseline (60s med)')
-        for start, end in events:
-            plt.axvspan(start / fs / 60.0, end / fs / 60.0, color='red', alpha=0.3)
-        plt.xlabel('Tiempo (min)')
-        plt.ylabel('SpO2 (%)')
-        plt.title(f'Sujeto {subjet} - ODI detectado: {odi_mean:.2f} eventos/h')
-        plt.legend()
-        plt.tight_layout()
-        plt.show()
 
     return odi_mean, odi_deepness
