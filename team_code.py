@@ -10,32 +10,20 @@
 ################################################################################
 
 import joblib
-import numpy as np
 import os
 import atexit
 import builtins
-import edfio
-import hashlib
-import pandas as pd
 import re
-from concurrent.futures import ThreadPoolExecutor
-from xgboost import XGBClassifier
 import sys
 from tqdm import tqdm
 
 from helper_code import *
-from src.resp_processing import RESP_FEATURE_LENGTH, processResp, _get_resp_alias_groups
-from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, processEEG, _get_eeg_aliases, _normalize_label as _normalize_eeg_label
-from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_KEYWORDS, processECG
+from src.pipeline.config import DEFAULT_CSV_PATH
+from src.pipeline.features import _get_feature_cache_file, get_or_create_record_feature_vector
+from src.pipeline.training import train_xgb_model
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
-
-# Get the absolute directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Build the absolute path to the CSV file relative to the script location
-DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
 
 # Progress bar state for run_model (initialized lazily)
 RUN_MODEL_PBAR = None
@@ -43,277 +31,6 @@ RUN_MODEL_PBAR_TOTAL = None
 ORIGINAL_PRINT = builtins.print
 PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
-RENAME_RULES_CACHE = {}
-REQUIRED_SIGNAL_ALIASES_CACHE = {}
-MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
-FEATURE_CACHE_FOLDER_NAME = '.feature_cache'
-TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH = (
-    RESP_FEATURE_LENGTH
-    + EEG_FEATURE_LENGTH
-    + ECG_FEATURE_LENGTH
-)
-
-
-def build_training_metadata_cache(patient_data_file):
-    metadata = pd.read_csv(patient_data_file)
-    demographics_cache = {}
-    diagnosis_cache = {}
-
-    for row in metadata.to_dict('records'):
-        patient_id = row[HEADERS['bids_folder']]
-        session_id = row[HEADERS['session_id']]
-        demographics_cache[(patient_id, session_id)] = row
-        diagnosis_cache[patient_id] = load_label(row)
-
-    return demographics_cache, diagnosis_cache
-
-
-def get_rename_rules(csv_path):
-    normalized_csv_path = os.path.abspath(csv_path)
-    rename_rules = RENAME_RULES_CACHE.get(normalized_csv_path)
-    if rename_rules is None:
-        rename_rules = load_rename_rules(normalized_csv_path)
-        RENAME_RULES_CACHE[normalized_csv_path] = rename_rules
-    return rename_rules
-
-
-def _coerce_feature_vector(features):
-    vector = np.asarray(features, dtype=np.float32).reshape(-1)
-    return np.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def _extract_optional_features(extractor, expected_length, *args, **kwargs):
-    vector = _coerce_feature_vector(extractor(*args, **kwargs))
-    if vector.size != expected_length:
-        raise ValueError(
-            f"{extractor.__name__} returned {vector.size} features; expected {expected_length}."
-        )
-    return vector
-
-
-def _get_record_file_paths(data_folder, site_id, patient_id, session_id):
-    physiological_data_file = os.path.join(
-        data_folder,
-        PHYSIOLOGICAL_DATA_SUBFOLDER,
-        site_id,
-        f"{patient_id}_ses-{session_id}.edf"
-    )
-    algorithmic_annotations_file = os.path.join(
-        data_folder,
-        ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
-        site_id,
-        f"{patient_id}_ses-{session_id}_caisr_annotations.edf"
-    )
-    return physiological_data_file, algorithmic_annotations_file
-
-
-def _normalize_signal_label(text):
-    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
-    return ' '.join(normalized.split())
-
-
-def _get_required_signal_aliases(csv_path):
-    normalized_csv_path = os.path.abspath(csv_path)
-    required_aliases = REQUIRED_SIGNAL_ALIASES_CACHE.get(normalized_csv_path)
-    if required_aliases is not None:
-        return required_aliases
-
-    resp_alias_groups = _get_resp_alias_groups(normalized_csv_path)
-    eeg_aliases = _get_eeg_aliases(normalized_csv_path)
-
-    required_aliases = set()
-    for aliases in resp_alias_groups.values():
-        required_aliases.update(aliases)
-
-    for channel_spec in EEG_CHANNEL_SPECS.values():
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['direct']), set()))
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['positive']), set()))
-        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['reference']), set()))
-
-    REQUIRED_SIGNAL_ALIASES_CACHE[normalized_csv_path] = required_aliases
-    return required_aliases
-
-
-def _load_required_signal_data(edf_path, csv_path):
-    required_aliases = _get_required_signal_aliases(csv_path)
-    channel_dict = {}
-    fs_dict = {}
-
-    try:
-        edf = edfio.read_edf(edf_path, lazy_load_data=True)
-    except Exception:
-        return load_signal_data(edf_path)
-
-    for signal in edf.signals:
-        label = signal.label.lower().strip()
-        normalized_label = _normalize_signal_label(label)
-        is_required_signal = normalized_label in required_aliases
-        is_ecg_signal = any(keyword in normalized_label for keyword in ECG_KEYWORDS)
-
-        if not is_required_signal and not is_ecg_signal:
-            continue
-
-        fs_dict[label] = float(signal.sampling_frequency)
-        channel_dict[label] = signal.data
-
-    if channel_dict:
-        return channel_dict, fs_dict
-
-    return load_signal_data(edf_path)
-
-
-def _get_feature_cache_file(data_folder, site_id, patient_id, session_id):
-    folder_hash = hashlib.sha1(os.path.abspath(data_folder).encode('utf-8')).hexdigest()[:12]
-    cache_dir = os.path.join(
-        SCRIPT_DIR,
-        FEATURE_CACHE_FOLDER_NAME,
-        folder_hash,
-        site_id,
-    )
-    return os.path.join(cache_dir, f"{patient_id}_ses-{session_id}.sav")
-
-
-def _load_cached_feature_vector(cache_file):
-    if not os.path.exists(cache_file):
-        return None
-
-    try:
-        payload = joblib.load(cache_file)
-    except Exception:
-        return None
-
-    if isinstance(payload, dict):
-        payload = payload.get('features')
-
-    if payload is None:
-        return None
-
-    return _coerce_feature_vector(payload)
-
-
-def _save_cached_feature_vector(cache_file, feature_vector):
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-    temp_cache_file = f"{cache_file}.tmp"
-    payload = _coerce_feature_vector(feature_vector)
-
-    try:
-        joblib.dump(payload, temp_cache_file, protocol=0)
-        os.replace(temp_cache_file, cache_file)
-    finally:
-        if os.path.exists(temp_cache_file):
-            os.remove(temp_cache_file)
-
-
-def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_id, session_id, csv_path, require_physiological_data):
-    demographic_features = extract_demographic_features(patient_data)
-    physiological_data_file, _ = _get_record_file_paths(
-        data_folder,
-        site_id,
-        patient_id,
-        session_id,
-    )
-
-    if os.path.exists(physiological_data_file):
-        physiological_data, physiological_fs = _load_required_signal_data(physiological_data_file, csv_path)
-        physiological_features = extract_extended_physiological_features(
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    elif require_physiological_data:
-        raise FileNotFoundError(f"Missing physiological data for {patient_id}.")
-    else:
-        physiological_features = np.zeros(TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH, dtype=np.float32)
-
-    return np.hstack([demographic_features, physiological_features]).astype(np.float32)
-
-
-def get_or_create_record_feature_vector(record, data_folder, patient_data, csv_path=DEFAULT_CSV_PATH, require_physiological_data=True):
-    patient_id = record[HEADERS['bids_folder']]
-    site_id = record[HEADERS['site_id']]
-    session_id = record[HEADERS['session_id']]
-    cache_file = _get_feature_cache_file(data_folder, site_id, patient_id, session_id)
-    cached_features = _load_cached_feature_vector(cache_file)
-    if cached_features is not None:
-        return cached_features
-
-    feature_vector = _compute_record_feature_vector(
-        patient_data,
-        data_folder,
-        site_id,
-        patient_id,
-        session_id,
-        csv_path,
-        require_physiological_data,
-    )
-    _save_cached_feature_vector(cache_file, feature_vector)
-    return feature_vector
-
-
-def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
-    try:
-        resp_features = _extract_optional_features(
-            processResp,
-            RESP_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        resp_features = np.zeros(RESP_FEATURE_LENGTH, dtype=np.float32)
-
-    try:
-        eeg_features = _extract_optional_features(
-            processEEG,
-            EEG_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
-
-    try:
-        ecg_features = _extract_optional_features(
-            processECG,
-            ECG_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
-
-    return np.hstack([resp_features, eeg_features, ecg_features]).astype(np.float32)
-
-
-def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
-    patient_id = record[HEADERS['bids_folder']]
-    session_id = record[HEADERS['session_id']]
-
-    try:
-        patient_data = demographics_cache.get((patient_id, session_id), {})
-        feature_vector = get_or_create_record_feature_vector(
-            record,
-            data_folder,
-            patient_data,
-            csv_path=csv_path,
-            require_physiological_data=True,
-        )
-
-        label = diagnosis_cache.get(patient_id)
-
-        if label == 0 or label == 1:
-            return patient_id, feature_vector, label, None
-
-        return patient_id, None, None, f"Invalid label for {patient_id}. Skipping..."
-
-    except FileNotFoundError as e:
-        return patient_id, None, None, f"{e} Skipping..."
-    except Exception as e:
-        return patient_id, None, None, f"Error processing {patient_id}: {e}"
-
-
 def _close_run_model_pbar():
     global RUN_MODEL_PBAR
     if RUN_MODEL_PBAR is not None:
@@ -362,72 +79,10 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose:
         print('Finding the Challenge data...')
 
-    patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-    patient_metadata_list = find_patients(patient_data_file)
-    demographics_cache, diagnosis_cache = build_training_metadata_cache(patient_data_file)
-    num_records = len(patient_metadata_list)
-
-    if num_records == 0:
-        raise FileNotFoundError('No data were provided.')
-
-    # Extract the features and labels from the data.
-    if verbose:
-        print('Extracting features and labels from the data...')
-
-    features = list()
-    labels = list()
-
-    with ThreadPoolExecutor(max_workers=MAX_TRAIN_WORKERS) as executor:
-        results = executor.map(
-            lambda record: process_training_record(
-                record,
-                data_folder,
-                demographics_cache,
-                diagnosis_cache,
-                csv_path
-            ),
-            patient_metadata_list
-        )
-
-        pbar = tqdm(results, total=num_records, desc="Extracting Features", unit="record", disable=not verbose)
-        for patient_id, feature_vector, label, message in pbar:
-            if verbose:
-                pbar.set_postfix({"patient": patient_id})
-
-            if message is not None:
-                tqdm.write(f"  ! {message}")
-                continue
-
-            features.append(feature_vector)
-            labels.append(label)
-
-        pbar.close()
-
-    features = np.asarray(features, dtype=np.float32)
-    labels = np.asarray(labels, dtype=np.int32)
-
-    if features.size == 0 or features.ndim != 2 or features.shape[0] == 0:
-        raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
-
-    # Train the models on the features.
     if verbose:
         print('Training the model on the data...')
 
-    neg = int(np.sum(labels == 0))
-    pos = int(np.sum(labels == 1))
-    scale_pos_weight = (neg / pos) if pos > 0 else 1.0
-
-    model = XGBClassifier(
-        scale_pos_weight=scale_pos_weight,
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        random_state=42,
-        eval_metric='auc',
-        tree_method='hist',
-    )
-    model.fit(features, labels)
+    model = train_xgb_model(data_folder, verbose, csv_path)
 
     # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
@@ -505,36 +160,6 @@ def run_model(model, record, data_folder, verbose):
             RUN_MODEL_PBAR = None
 
     return binary_output, probability_output
-
-################################################################################
-#
-# Optional functions. You can change or remove these functions and/or add new functions.
-#
-################################################################################
-
-def extract_demographic_features(data):
-    """
-    Extracts the demographic subset used by the current XGBoost model.
-    
-    Inputs:
-        data (dict): A dictionary containing patient metadata (e.g., from a CSV row).
-    
-    Returns:
-        np.array: A feature vector of length 4 with age and sex only.
-    """
-    age = np.array([load_age(data)])
-
-    sex = load_sex(data)
-    sex_vec = np.zeros(3)
-    if sex == 'Female': 
-        sex_vec[0] = 1
-    elif sex == 'Male': 
-        sex_vec[1] = 1
-    else: 
-        sex_vec[2] = 1
-
-    return np.concatenate([age, sex_vec])
-
 
 # Save your trained model.
 def save_model(model_folder, model):
