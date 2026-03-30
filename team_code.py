@@ -14,6 +14,7 @@ import numpy as np
 import os
 import atexit
 import builtins
+import edfio
 import hashlib
 import pandas as pd
 import re
@@ -23,9 +24,9 @@ import sys
 from tqdm import tqdm
 
 from helper_code import *
-from src.resp_processing import RESP_FEATURE_LENGTH, processResp
-from src.eeg_processing import EEG_FEATURE_LENGTH, processEEG
-from src.ecg_processing import ECG_FEATURE_LENGTH, processECG
+from src.resp_processing import RESP_FEATURE_LENGTH, processResp, _get_resp_alias_groups
+from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, processEEG, _get_eeg_aliases, _normalize_label as _normalize_eeg_label
+from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_KEYWORDS, processECG
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -43,6 +44,7 @@ ORIGINAL_PRINT = builtins.print
 PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
 RENAME_RULES_CACHE = {}
+REQUIRED_SIGNAL_ALIASES_CACHE = {}
 MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
 FEATURE_CACHE_FOLDER_NAME = '.feature_cache'
 TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH = (
@@ -105,6 +107,61 @@ def _get_record_file_paths(data_folder, site_id, patient_id, session_id):
     return physiological_data_file, algorithmic_annotations_file
 
 
+def _normalize_signal_label(text):
+    normalized = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
+    return ' '.join(normalized.split())
+
+
+def _get_required_signal_aliases(csv_path):
+    normalized_csv_path = os.path.abspath(csv_path)
+    required_aliases = REQUIRED_SIGNAL_ALIASES_CACHE.get(normalized_csv_path)
+    if required_aliases is not None:
+        return required_aliases
+
+    resp_alias_groups = _get_resp_alias_groups(normalized_csv_path)
+    eeg_aliases = _get_eeg_aliases(normalized_csv_path)
+
+    required_aliases = set()
+    for aliases in resp_alias_groups.values():
+        required_aliases.update(aliases)
+
+    for channel_spec in EEG_CHANNEL_SPECS.values():
+        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['direct']), set()))
+        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['positive']), set()))
+        required_aliases.update(eeg_aliases.get(_normalize_eeg_label(channel_spec['reference']), set()))
+
+    REQUIRED_SIGNAL_ALIASES_CACHE[normalized_csv_path] = required_aliases
+    return required_aliases
+
+
+def _load_required_signal_data(edf_path, csv_path):
+    required_aliases = _get_required_signal_aliases(csv_path)
+    channel_dict = {}
+    fs_dict = {}
+
+    try:
+        edf = edfio.read_edf(edf_path, lazy_load_data=True)
+    except Exception:
+        return load_signal_data(edf_path)
+
+    for signal in edf.signals:
+        label = signal.label.lower().strip()
+        normalized_label = _normalize_signal_label(label)
+        is_required_signal = normalized_label in required_aliases
+        is_ecg_signal = any(keyword in normalized_label for keyword in ECG_KEYWORDS)
+
+        if not is_required_signal and not is_ecg_signal:
+            continue
+
+        fs_dict[label] = float(signal.sampling_frequency)
+        channel_dict[label] = signal.data
+
+    if channel_dict:
+        return channel_dict, fs_dict
+
+    return load_signal_data(edf_path)
+
+
 def _get_feature_cache_file(data_folder, site_id, patient_id, session_id):
     folder_hash = hashlib.sha1(os.path.abspath(data_folder).encode('utf-8')).hexdigest()[:12]
     cache_dir = os.path.join(
@@ -157,7 +214,7 @@ def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_i
     )
 
     if os.path.exists(physiological_data_file):
-        physiological_data, physiological_fs = load_signal_data(physiological_data_file)
+        physiological_data, physiological_fs = _load_required_signal_data(physiological_data_file, csv_path)
         physiological_features = extract_extended_physiological_features(
             physiological_data,
             physiological_fs,
