@@ -14,6 +14,7 @@ import numpy as np
 import os
 import atexit
 import builtins
+import hashlib
 import pandas as pd
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +44,14 @@ PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
 RENAME_RULES_CACHE = {}
 MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
+FEATURE_CACHE_FOLDER_NAME = '.feature_cache'
+BASE_PHYSIOLOGICAL_FEATURE_LENGTH = 49
+TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH = (
+    BASE_PHYSIOLOGICAL_FEATURE_LENGTH
+    + RESP_FEATURE_LENGTH
+    + EEG_FEATURE_LENGTH
+    + ECG_FEATURE_LENGTH
+)
 
 
 def build_training_metadata_cache(patient_data_file):
@@ -80,6 +89,116 @@ def _extract_optional_features(extractor, expected_length, *args, **kwargs):
             f"{extractor.__name__} returned {vector.size} features; expected {expected_length}."
         )
     return vector
+
+
+def _get_record_file_paths(data_folder, site_id, patient_id, session_id):
+    physiological_data_file = os.path.join(
+        data_folder,
+        PHYSIOLOGICAL_DATA_SUBFOLDER,
+        site_id,
+        f"{patient_id}_ses-{session_id}.edf"
+    )
+    algorithmic_annotations_file = os.path.join(
+        data_folder,
+        ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
+        site_id,
+        f"{patient_id}_ses-{session_id}_caisr_annotations.edf"
+    )
+    return physiological_data_file, algorithmic_annotations_file
+
+
+def _get_feature_cache_file(data_folder, site_id, patient_id, session_id):
+    folder_hash = hashlib.sha1(os.path.abspath(data_folder).encode('utf-8')).hexdigest()[:12]
+    cache_dir = os.path.join(
+        SCRIPT_DIR,
+        FEATURE_CACHE_FOLDER_NAME,
+        folder_hash,
+        site_id,
+    )
+    return os.path.join(cache_dir, f"{patient_id}_ses-{session_id}.sav")
+
+
+def _load_cached_feature_vector(cache_file):
+    if not os.path.exists(cache_file):
+        return None
+
+    try:
+        payload = joblib.load(cache_file)
+    except Exception:
+        return None
+
+    if isinstance(payload, dict):
+        payload = payload.get('features')
+
+    if payload is None:
+        return None
+
+    return _coerce_feature_vector(payload)
+
+
+def _save_cached_feature_vector(cache_file, feature_vector):
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    temp_cache_file = f"{cache_file}.tmp"
+    payload = _coerce_feature_vector(feature_vector)
+
+    try:
+        joblib.dump(payload, temp_cache_file, protocol=0)
+        os.replace(temp_cache_file, cache_file)
+    finally:
+        if os.path.exists(temp_cache_file):
+            os.remove(temp_cache_file)
+
+
+def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_id, session_id, csv_path, require_physiological_data):
+    demographic_features = extract_demographic_features(patient_data)
+    physiological_data_file, algorithmic_annotations_file = _get_record_file_paths(
+        data_folder,
+        site_id,
+        patient_id,
+        session_id,
+    )
+
+    if os.path.exists(physiological_data_file):
+        physiological_data, physiological_fs = load_signal_data(physiological_data_file)
+        physiological_features = extract_extended_physiological_features(
+            physiological_data,
+            physiological_fs,
+            csv_path=csv_path,
+        )
+    elif require_physiological_data:
+        raise FileNotFoundError(f"Missing physiological data for {patient_id}.")
+    else:
+        physiological_features = np.zeros(TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH, dtype=np.float32)
+
+    if os.path.exists(algorithmic_annotations_file):
+        algorithmic_annotations, _ = load_signal_data(algorithmic_annotations_file)
+        algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
+    else:
+        algorithmic_features = np.zeros(12, dtype=np.float32)
+
+    return np.hstack([demographic_features, physiological_features, algorithmic_features]).astype(np.float32)
+
+
+def get_or_create_record_feature_vector(record, data_folder, patient_data, csv_path=DEFAULT_CSV_PATH, require_physiological_data=True):
+    patient_id = record[HEADERS['bids_folder']]
+    site_id = record[HEADERS['site_id']]
+    session_id = record[HEADERS['session_id']]
+    cache_file = _get_feature_cache_file(data_folder, site_id, patient_id, session_id)
+    cached_features = _load_cached_feature_vector(cache_file)
+    if cached_features is not None:
+        return cached_features
+
+    feature_vector = _compute_record_feature_vector(
+        patient_data,
+        data_folder,
+        site_id,
+        patient_id,
+        session_id,
+        csv_path,
+        require_physiological_data,
+    )
+    _save_cached_feature_vector(cache_file, feature_vector)
+    return feature_vector
 
 
 def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
@@ -126,48 +245,27 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
 
 def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
     patient_id = record[HEADERS['bids_folder']]
-    site_id = record[HEADERS['site_id']]
     session_id = record[HEADERS['session_id']]
 
     try:
         patient_data = demographics_cache.get((patient_id, session_id), {})
-        demographic_features = extract_demographic_features(patient_data)
-
-        physiological_data_file = os.path.join(
+        feature_vector = get_or_create_record_feature_vector(
+            record,
             data_folder,
-            PHYSIOLOGICAL_DATA_SUBFOLDER,
-            site_id,
-            f"{patient_id}_ses-{session_id}.edf"
+            patient_data,
+            csv_path=csv_path,
+            require_physiological_data=True,
         )
-        if not os.path.exists(physiological_data_file):
-            return patient_id, None, None, f"Missing physiological data for {patient_id}. Skipping..."
-
-        physiological_data, physiological_fs = load_signal_data(physiological_data_file)
-        physiological_features = extract_extended_physiological_features(
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path
-        )
-        algorithmic_annotations_file = os.path.join(
-            data_folder,
-            ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
-            site_id,
-            f"{patient_id}_ses-{session_id}_caisr_annotations.edf"
-        )
-        if os.path.exists(algorithmic_annotations_file):
-            algorithmic_annotations, _ = load_signal_data(algorithmic_annotations_file)
-            algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
-        else:
-            algorithmic_features = np.zeros(12, dtype=np.float32)
 
         label = diagnosis_cache.get(patient_id)
 
         if label == 0 or label == 1:
-            feature_vector = np.hstack([demographic_features, physiological_features, algorithmic_features])
             return patient_id, feature_vector, label, None
 
         return patient_id, None, None, f"Invalid label for {patient_id}. Skipping..."
 
+    except FileNotFoundError as e:
+        return patient_id, None, None, f"{e} Skipping..."
     except Exception as e:
         return patient_id, None, None, f"Error processing {patient_id}: {e}"
 
@@ -339,27 +437,13 @@ def run_model(model, record, data_folder, verbose):
     # Load the patient data.
     patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
     patient_data = load_demographics(patient_data_file, patient_id, session_id)
-    demographic_features = extract_demographic_features(patient_data)
-
-    # Load signal data.
-    phys_file = os.path.join(data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}.edf")
-    if os.path.exists(phys_file):
-        phys_data, phys_fs = load_signal_data(phys_file)
-        # Ensure csv_path is accessible or defined
-        physiological_features = extract_extended_physiological_features(phys_data, phys_fs)
-    else:
-        physiological_features = np.zeros(49 + RESP_FEATURE_LENGTH + EEG_FEATURE_LENGTH, dtype=np.float32)
-
-    # Load Algorithmic Annotations
-    algo_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
-    if os.path.exists(algo_file):
-        algo_data, _ = load_signal_data(algo_file)
-        algorithmic_features = extract_algorithmic_annotations_features(algo_data)
-    else:
-        # Fallback to zeros (length 12)
-        algorithmic_features = np.zeros(12, dtype=np.float32)
-
-    features = np.hstack([demographic_features, physiological_features, algorithmic_features]).reshape(1, -1)
+    features = get_or_create_record_feature_vector(
+        record,
+        data_folder,
+        patient_data,
+        csv_path=DEFAULT_CSV_PATH,
+        require_physiological_data=False,
+    ).reshape(1, -1)
 
     # Get the model outputs.
     binary_output = model.predict(features)[0]

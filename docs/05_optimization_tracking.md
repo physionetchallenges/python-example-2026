@@ -112,6 +112,29 @@ Riesgo:
 - Medio.
 - El acceso paralelo a archivos puede comportarse distinto en discos más lentos o en una infraestructura más limitada del Challenge.
 
+### 5. Caché persistente de features por registro
+
+Cambio:
+
+- Se añadió una caché en disco por registro `(site_id, patient_id, session_id)`.
+- Antes de extraer features, el pipeline comprueba si ya existe el archivo de caché para ese paciente.
+- Si el archivo existe, se reutiliza directamente; si no existe, se calcula y se guarda.
+
+Motivo:
+
+- La extracción fisiológica es el cuello de botella dominante.
+- En iteraciones sucesivas de entrenamiento o inferencia se estaban recalculando features ya generadas para los mismos registros.
+
+Efecto esperado:
+
+- La primera ejecución mantiene un coste parecido al actual.
+- Las siguientes ejecuciones sobre el mismo dataset reutilizan las features ya materializadas y reducen de forma importante el tiempo total.
+
+Riesgo:
+
+- Bajo a medio.
+- Si cambia la lógica de extracción y se quiere regenerar todo, habrá que borrar manualmente la carpeta de caché.
+- 
 ## Plan De Rollback
 
 Si la submission se comporta distinto en el entorno del Challenge, revertir en este orden:
