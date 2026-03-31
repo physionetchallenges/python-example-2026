@@ -20,6 +20,7 @@ IMAGE_NAME="cinc2026"
 
 MODEL_FULL_REL="model"
 MODEL_SMOKE_REL="model_smoke"
+FEATURE_CACHE_REL=".feature_cache"
 
 OUT_FULL_REL="outputs"
 OUT_SMOKE_REL="outputs_smoke"
@@ -110,57 +111,72 @@ create_smoke() {
 
 train_full() {
     local full_data model_full
-    local full_data_docker model_full_docker
+    local feature_cache
+    local full_data_docker model_full_docker feature_cache_docker
 
     full_data="$(get_absolute_path "$TRAIN_DATA_REL")"
     model_full="$(get_absolute_path ".")/${MODEL_FULL_REL}"
+    feature_cache="$(get_absolute_path ".")/${FEATURE_CACHE_REL}"
     full_data_docker="$(to_docker_path "$full_data")"
     model_full_docker="$(to_docker_path "$model_full")"
+    feature_cache_docker="$(to_docker_path "$feature_cache")"
 
     ensure_directory "$model_full"
+    ensure_directory "$feature_cache"
 
     docker_cli run --rm \
         -v "${full_data_docker}:/challenge/training_data:ro" \
         -v "${model_full_docker}:/challenge/model" \
+        -v "${feature_cache_docker}:/challenge/.feature_cache" \
         "$IMAGE_NAME" \
         python train_model.py -d training_data -m model -v
 }
 
 train_smoke() {
     local smoke_data model_smoke
-    local smoke_data_docker model_smoke_docker
+    local feature_cache
+    local smoke_data_docker model_smoke_docker feature_cache_docker
 
     smoke_data="$(get_absolute_path "$SMOKE_DATA_REL")"
     model_smoke="$(get_absolute_path ".")/${MODEL_SMOKE_REL}"
+    feature_cache="$(get_absolute_path ".")/${FEATURE_CACHE_REL}"
     smoke_data_docker="$(to_docker_path "$smoke_data")"
     model_smoke_docker="$(to_docker_path "$model_smoke")"
+    feature_cache_docker="$(to_docker_path "$feature_cache")"
 
     ensure_directory "$model_smoke"
+    ensure_directory "$feature_cache"
 
     docker_cli run --rm \
         -v "${smoke_data_docker}:/challenge/training_data:ro" \
         -v "${model_smoke_docker}:/challenge/model" \
+        -v "${feature_cache_docker}:/challenge/.feature_cache" \
         "$IMAGE_NAME" \
         python train_model.py -d training_data -m model -v
 }
 
 run_full() {
     local run_data model_full out_full
-    local run_data_docker model_full_docker out_full_docker
+    local feature_cache
+    local run_data_docker model_full_docker out_full_docker feature_cache_docker
 
     run_data="$(get_absolute_path "$RUN_DATA_REL")"
     model_full="$(get_absolute_path "$MODEL_FULL_REL")"
     out_full="$(get_absolute_path ".")/${OUT_FULL_REL}"
+    feature_cache="$(get_absolute_path ".")/${FEATURE_CACHE_REL}"
     run_data_docker="$(to_docker_path "$run_data")"
     model_full_docker="$(to_docker_path "$model_full")"
     out_full_docker="$(to_docker_path "$out_full")"
+    feature_cache_docker="$(to_docker_path "$feature_cache")"
 
     ensure_directory "$out_full"
+    ensure_directory "$feature_cache"
 
     docker_cli run --rm \
         -v "${run_data_docker}:/challenge/holdout_data:ro" \
         -v "${model_full_docker}:/challenge/model:ro" \
         -v "${out_full_docker}:/challenge/holdout_outputs" \
+        -v "${feature_cache_docker}:/challenge/.feature_cache" \
         "$IMAGE_NAME" \
         python run_model.py -d holdout_data -m model -o holdout_outputs -v
 
@@ -173,21 +189,26 @@ run_full() {
 
 run_smoke() {
     local smoke_data model_smoke out_smoke
-    local smoke_data_docker model_smoke_docker out_smoke_docker
+    local feature_cache
+    local smoke_data_docker model_smoke_docker out_smoke_docker feature_cache_docker
 
     smoke_data="$(get_absolute_path "$SMOKE_DATA_REL")"
     model_smoke="$(get_absolute_path "$MODEL_SMOKE_REL")"
     out_smoke="$(get_absolute_path ".")/${OUT_SMOKE_REL}"
+    feature_cache="$(get_absolute_path ".")/${FEATURE_CACHE_REL}"
     smoke_data_docker="$(to_docker_path "$smoke_data")"
     model_smoke_docker="$(to_docker_path "$model_smoke")"
     out_smoke_docker="$(to_docker_path "$out_smoke")"
+    feature_cache_docker="$(to_docker_path "$feature_cache")"
 
     ensure_directory "$out_smoke"
+    ensure_directory "$feature_cache"
 
     docker_cli run --rm \
         -v "${smoke_data_docker}:/challenge/holdout_data:ro" \
         -v "${model_smoke_docker}:/challenge/model:ro" \
         -v "${out_smoke_docker}:/challenge/holdout_outputs" \
+        -v "${feature_cache_docker}:/challenge/.feature_cache" \
         "$IMAGE_NAME" \
         python run_model.py -d holdout_data -m model -o holdout_outputs -v
 
