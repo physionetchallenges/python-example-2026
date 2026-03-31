@@ -1,5 +1,9 @@
 # Dataset
 data/
+data_smoke/
+
+# Cache
+.feature_cache/
 
 # Model artifacts
 model/
