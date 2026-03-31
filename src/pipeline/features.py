@@ -37,7 +37,8 @@ FEATURE_NAMES = (
 
 def _coerce_feature_vector(features):
     vector = np.asarray(features, dtype=np.float32).reshape(-1)
-    return np.nan_to_num(vector, nan=0.0, posinf=0.0, neginf=0.0)
+    vector[~np.isfinite(vector)] = np.nan
+    return vector
 
 
 def _extract_optional_features(extractor, expected_length, *args, **kwargs):
@@ -149,10 +150,17 @@ def _save_cached_feature_vector(cache_file, feature_vector):
 
 
 def extract_demographic_features(data):
-    age = np.array([load_age(data)])
+    age_value = data.get(HEADERS['age'])
+    try:
+        age = float(age_value)
+    except (TypeError, ValueError):
+        age = np.nan
+    if not np.isfinite(age):
+        age = np.nan
+    age = np.array([age], dtype=np.float32)
 
     sex = load_sex(data)
-    sex_vec = np.zeros(3)
+    sex_vec = np.zeros(3, dtype=np.float32)
     if sex == 'Female':
         sex_vec[0] = 1
     elif sex == 'Male':
@@ -160,7 +168,7 @@ def extract_demographic_features(data):
     else:
         sex_vec[2] = 1
 
-    return np.concatenate([age, sex_vec])
+    return np.concatenate([age, sex_vec]).astype(np.float32)
 
 
 def get_feature_names():
@@ -199,7 +207,7 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
             csv_path=csv_path,
         )
     except Exception:
-        resp_features = np.zeros(RESP_FEATURE_LENGTH, dtype=np.float32)
+        resp_features = np.full(RESP_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     try:
         eeg_features = _extract_optional_features(
@@ -210,7 +218,7 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
             csv_path=csv_path,
         )
     except Exception:
-        eeg_features = np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
+        eeg_features = np.full(EEG_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     try:
         ecg_features = _extract_optional_features(
@@ -221,7 +229,7 @@ def extract_extended_physiological_features(physiological_data, physiological_fs
             csv_path=csv_path,
         )
     except Exception:
-        ecg_features = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
+        ecg_features = np.full(ECG_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     return np.hstack([resp_features, eeg_features, ecg_features]).astype(np.float32)
 
@@ -245,7 +253,7 @@ def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_i
     elif require_physiological_data:
         raise FileNotFoundError(f"Missing physiological data for {patient_id}.")
     else:
-        physiological_features = np.zeros(TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH, dtype=np.float32)
+        physiological_features = np.full(TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     return np.hstack([demographic_features, physiological_features]).astype(np.float32)
 

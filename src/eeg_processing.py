@@ -142,14 +142,14 @@ def _extract_channel_metrics(signal, fs):
     patient_profile = eeg_features.get_patient_profile(band_powers)
     metrics = {
         str(name): float(value)
-        for name, value in patient_profile.replace([np.inf, -np.inf], np.nan).fillna(0.0).items()
+        for name, value in patient_profile.replace([np.inf, -np.inf], np.nan).items()
     }
     for complexity_name in ('Hjorth_Mobility', 'Hjorth_Complexity'):
         if complexity_name in complexities:
-            value = complexities[complexity_name].replace([np.inf, -np.inf], np.nan).fillna(0.0).std()
-            metrics[complexity_name] = float(0.0 if pd.isna(value) else value)
+            value = complexities[complexity_name].replace([np.inf, -np.inf], np.nan).std()
+            metrics[complexity_name] = float(np.nan if pd.isna(value) else value)
         else:
-            metrics[complexity_name] = 0.0
+            metrics[complexity_name] = np.nan
     return metrics
 
 
@@ -167,15 +167,15 @@ def processEEG(physiological_data, physiological_fs, csv_path):
             channel_profiles[channel_name] = metrics
 
     if not channel_profiles:
-        return np.zeros(EEG_FEATURE_LENGTH, dtype=np.float32)
+        return np.full(EEG_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     values = []
     for channel_name, metric_name in EEG_FEATURE_SPECS:
         channel_metrics = channel_profiles.get(channel_name)
         if channel_metrics is None:
-            values.append(0.0)
+            values.append(np.nan)
             continue
-        values.append(float(channel_metrics.get(metric_name, 0.0)))
+        values.append(float(channel_metrics.get(metric_name, np.nan)))
 
     return np.asarray(values, dtype=np.float32)
 

@@ -111,7 +111,7 @@ def _summarize_spo2(data, fs):
 
 def processResp(physiological_data, physiological_fs, csv_path):
     alias_groups = _get_resp_alias_groups(csv_path)
-    results = {feature_name: 0.0 for feature_name in RESP_FEATURE_NAMES}
+    results = {feature_name: np.nan for feature_name in RESP_FEATURE_NAMES}
     best_quality = {group_name: -np.inf for group_name in RESP_CHANNEL_GROUPS}
 
     for label, signal in physiological_data.items():

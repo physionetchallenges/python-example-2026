@@ -33,7 +33,7 @@ def _find_ecg_channel(physiological_data):
 
 
 def processECG(physiological_data, physiological_fs, csv_path):
-    results = np.zeros(ECG_FEATURE_LENGTH, dtype=np.float32)
+    results = np.full(ECG_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     ecg_label = _find_ecg_channel(physiological_data)
 
@@ -55,7 +55,8 @@ def processECG(physiological_data, physiological_fs, csv_path):
         if values is None or len(values) == 0:
             return results
 
-        values = values.astype(np.float32)
+        values = np.asarray(values, dtype=np.float32)
+        values[~np.isfinite(values)] = np.nan
 
         if len(values) >= ECG_FEATURE_LENGTH:
             results[:] = values[:ECG_FEATURE_LENGTH]

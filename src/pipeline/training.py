@@ -3,8 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
+from sklearn.impute import KNNImputer
 from sklearn.metrics import f1_score
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
@@ -16,6 +19,7 @@ from .features import get_feature_group_indices, get_feature_names, get_or_creat
 
 DEFAULT_ENSEMBLE_THRESHOLD = 0.5
 ENSEMBLE_MODALITIES = ('resp', 'eeg', 'ecg')
+DEFAULT_KNN_NEIGHBORS = 5
 
 
 def build_training_metadata_cache(patient_data_file):
@@ -97,6 +101,14 @@ def _fit_model(feature_matrix, labels):
     return model
 
 
+def _build_preprocessor(num_samples):
+    neighbors = min(DEFAULT_KNN_NEIGHBORS, max(1, num_samples - 1)) if num_samples > 1 else 1
+    return Pipeline([
+        ('imputer', KNNImputer(n_neighbors=neighbors, keep_empty_features=True)),
+        ('scaler', StandardScaler()),
+    ])
+
+
 def _fit_ensemble(feature_matrix, labels, feature_indices):
     models = {
         'all': _fit_model(feature_matrix[:, feature_indices['all']], labels),
@@ -110,13 +122,15 @@ def _fit_ensemble(feature_matrix, labels, feature_indices):
 
 def _has_modality_signal(feature_vector, modality_presence_indices):
     modality_values = feature_vector[modality_presence_indices]
-    return bool(np.any(np.abs(modality_values) > 0.0))
+    return bool(np.any(np.isfinite(modality_values)))
 
 
 def predict_ensemble_probabilities(model_bundle, feature_matrix):
-    feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
-    if feature_matrix.ndim == 1:
-        feature_matrix = feature_matrix.reshape(1, -1)
+    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
+    if raw_feature_matrix.ndim == 1:
+        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
+    raw_feature_matrix = raw_feature_matrix.copy()
+    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
 
     models = model_bundle['models']
     feature_indices = {
@@ -127,20 +141,26 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         name: np.asarray(indices, dtype=np.int32)
         for name, indices in model_bundle['modality_presence_indices'].items()
     }
+    preprocessor = model_bundle.get('preprocessor')
+    if preprocessor is not None:
+        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
+    else:
+        processed_feature_matrix = raw_feature_matrix
 
-    probabilities = np.zeros(feature_matrix.shape[0], dtype=np.float32)
-    for row_index, feature_vector in enumerate(feature_matrix):
+    probabilities = np.zeros(raw_feature_matrix.shape[0], dtype=np.float32)
+    for row_index, raw_feature_vector in enumerate(raw_feature_matrix):
+        processed_feature_vector = processed_feature_matrix[row_index]
         modality_probabilities = []
         for modality in ENSEMBLE_MODALITIES:
-            if _has_modality_signal(feature_vector, modality_presence_indices[modality]):
-                modality_vector = feature_vector[feature_indices[modality]].reshape(1, -1)
+            if _has_modality_signal(raw_feature_vector, modality_presence_indices[modality]):
+                modality_vector = processed_feature_vector[feature_indices[modality]].reshape(1, -1)
                 modality_probability = models[modality].predict_proba(modality_vector)[0][1]
                 modality_probabilities.append(float(modality_probability))
 
         if modality_probabilities:
             probabilities[row_index] = float(np.mean(modality_probabilities))
         else:
-            all_features = feature_vector[feature_indices['all']].reshape(1, -1)
+            all_features = processed_feature_vector[feature_indices['all']].reshape(1, -1)
             probabilities[row_index] = float(models['all'].predict_proba(all_features)[0][1])
 
     return probabilities
@@ -153,7 +173,7 @@ def predict_ensemble_labels(model_bundle, feature_matrix):
     return labels, probabilities
 
 
-def _calibrate_threshold(feature_matrix, labels, feature_indices):
+def _calibrate_threshold(feature_matrix, labels, feature_indices, modality_presence_indices):
     classes, class_counts = np.unique(labels, return_counts=True)
     if len(classes) != 2 or np.min(class_counts) < 2 or len(labels) < 10:
         return DEFAULT_ENSEMBLE_THRESHOLD
@@ -169,14 +189,15 @@ def _calibrate_threshold(feature_matrix, labels, feature_indices):
     except ValueError:
         return DEFAULT_ENSEMBLE_THRESHOLD
 
+    preprocessor = _build_preprocessor(len(train_labels))
+    processed_train_features = np.asarray(preprocessor.fit_transform(train_features), dtype=np.float32)
+
     calibration_bundle = {
-        'models': _fit_ensemble(train_features, train_labels, feature_indices),
+        'models': _fit_ensemble(processed_train_features, train_labels, feature_indices),
         'feature_indices': feature_indices,
-        'modality_presence_indices': {
-            modality: feature_indices[f'{modality}_only']
-            for modality in ENSEMBLE_MODALITIES
-        },
+        'modality_presence_indices': modality_presence_indices,
         'threshold': DEFAULT_ENSEMBLE_THRESHOLD,
+        'preprocessor': preprocessor,
     }
     validation_probabilities = predict_ensemble_probabilities(calibration_bundle, validation_features)
     return best_threshold(validation_probabilities, validation_labels)
@@ -227,8 +248,11 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
         raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
 
     feature_indices = get_feature_group_indices(include_demographics=True)
-    threshold = _calibrate_threshold(features, labels, feature_indices)
-    models = _fit_ensemble(features, labels, feature_indices)
+    modality_presence_indices = get_feature_group_indices(include_demographics=False)
+    preprocessor = _build_preprocessor(len(labels))
+    processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
+    threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
+    models = _fit_ensemble(processed_features, labels, feature_indices)
 
     return {
         'type': 'multimodal_xgb_ensemble',
@@ -240,9 +264,9 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
             if name in {'all', 'resp', 'eeg', 'ecg'}
         },
         'modality_presence_indices': {
-            modality: get_feature_group_indices(include_demographics=False)[modality].tolist()
+            modality: modality_presence_indices[modality].tolist()
             for modality in ENSEMBLE_MODALITIES
         },
         'models': models,
-        'preprocessor': None,
+        'preprocessor': preprocessor,
     }
