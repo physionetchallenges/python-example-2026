@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from helper_code import *
 from src.pipeline.config import DEFAULT_CSV_PATH
-from src.pipeline.features import get_or_create_record_feature_vector
+from src.pipeline.features import get_feature_export_dir, get_or_create_record_feature_vector
 from src.pipeline.training import predict_ensemble_labels, train_multimodal_ensemble
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
@@ -82,13 +82,23 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose:
         print('Training the model on the data...')
 
-    model = train_multimodal_ensemble(data_folder, verbose, csv_path)
-
     # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
 
+    model = train_multimodal_ensemble(
+        data_folder,
+        verbose,
+        csv_path,
+        export_folder=get_feature_export_dir(data_folder),
+    )
+
     # Save the model.
     save_model(model_folder, model)
+
+    feature_exports = model.get('feature_exports', {})
+    if verbose and feature_exports:
+        print(f"Raw features CSV: {feature_exports.get('raw')}")
+        print(f"Preprocessed features CSV: {feature_exports.get('preprocessed')}")
 
     if verbose:
         print('Done.')

@@ -39,6 +39,7 @@ def build_training_metadata_cache(patient_data_file):
 def process_training_record(record, data_folder, demographics_cache, diagnosis_cache, csv_path):
     patient_id = record[HEADERS['bids_folder']]
     session_id = record[HEADERS['session_id']]
+    site_id = record[HEADERS['site_id']]
 
     try:
         patient_data = demographics_cache.get((patient_id, session_id), {})
@@ -51,16 +52,38 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
         )
 
         label = diagnosis_cache.get(patient_id)
+        metadata = {
+            'patient_id': patient_id,
+            'site_id': site_id,
+            'session_id': session_id,
+        }
 
         if label == 0 or label == 1:
-            return patient_id, feature_vector, label, None
+            return metadata, feature_vector, label, None
 
-        return patient_id, None, None, f"Invalid label for {patient_id}. Skipping..."
+        return metadata, None, None, f"Invalid label for {patient_id}. Skipping..."
 
     except FileNotFoundError as exc:
-        return patient_id, None, None, f"{exc} Skipping..."
+        return {
+            'patient_id': patient_id,
+            'site_id': site_id,
+            'session_id': session_id,
+        }, None, None, f"{exc} Skipping..."
     except Exception as exc:
-        return patient_id, None, None, f"Error processing {patient_id}: {exc}"
+        return {
+            'patient_id': patient_id,
+            'site_id': site_id,
+            'session_id': session_id,
+        }, None, None, f"Error processing {patient_id}: {exc}"
+
+
+def _export_feature_matrix_csv(output_path, metadata_rows, labels, feature_matrix, feature_names):
+    dataframe = pd.DataFrame(metadata_rows)
+    dataframe['label'] = labels
+    feature_frame = pd.DataFrame(feature_matrix, columns=feature_names)
+    dataframe = pd.concat([dataframe.reset_index(drop=True), feature_frame.reset_index(drop=True)], axis=1)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    dataframe.to_csv(output_path, index=False)
 
 
 def best_threshold(probabilities, labels):
@@ -203,7 +226,7 @@ def _calibrate_threshold(feature_matrix, labels, feature_indices, modality_prese
     return best_threshold(validation_probabilities, validation_labels)
 
 
-def train_multimodal_ensemble(data_folder, verbose, csv_path):
+def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None):
     patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
     patient_metadata_list = find_patients(patient_data_file)
     demographics_cache, diagnosis_cache = build_training_metadata_cache(patient_data_file)
@@ -214,6 +237,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
 
     features = []
     labels = []
+    metadata_rows = []
 
     with ThreadPoolExecutor(max_workers=MAX_TRAIN_WORKERS) as executor:
         results = executor.map(
@@ -228,9 +252,9 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
         )
 
         pbar = tqdm(results, total=num_records, desc='Extracting Features', unit='record', disable=not verbose)
-        for patient_id, feature_vector, label, message in pbar:
+        for metadata, feature_vector, label, message in pbar:
             if verbose:
-                pbar.set_postfix({'patient': patient_id})
+                pbar.set_postfix({'patient': metadata['patient_id']})
 
             if message is not None:
                 tqdm.write(f"  ! {message}")
@@ -238,6 +262,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
 
             features.append(feature_vector)
             labels.append(label)
+            metadata_rows.append(metadata)
 
         pbar.close()
 
@@ -254,10 +279,17 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
     threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
     models = _fit_ensemble(processed_features, labels, feature_indices)
 
+    export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
+    raw_feature_export_path = os.path.join(export_root, 'training_features_raw.csv')
+    preprocessed_feature_export_path = os.path.join(export_root, 'training_features_preprocessed.csv')
+    feature_names = list(get_feature_names())
+    _export_feature_matrix_csv(raw_feature_export_path, metadata_rows, labels, features, feature_names)
+    _export_feature_matrix_csv(preprocessed_feature_export_path, metadata_rows, labels, processed_features, feature_names)
+
     return {
         'type': 'multimodal_xgb_ensemble',
         'threshold': threshold,
-        'feature_names': list(get_feature_names()),
+        'feature_names': feature_names,
         'feature_indices': {
             name: indices.tolist()
             for name, indices in feature_indices.items()
@@ -269,4 +301,8 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path):
         },
         'models': models,
         'preprocessor': preprocessor,
+        'feature_exports': {
+            'raw': raw_feature_export_path,
+            'preprocessed': preprocessed_feature_export_path,
+        },
     }

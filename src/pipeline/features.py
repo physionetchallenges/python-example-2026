@@ -1,9 +1,9 @@
-import hashlib
 import os
 
 import edfio
 import joblib
 import numpy as np
+import pandas as pd
 
 from src.common.channel_utils import normalize_channel_label
 from helper_code import HEADERS, PHYSIOLOGICAL_DATA_SUBFOLDER, load_age, load_sex, load_signal_data
@@ -33,6 +33,10 @@ FEATURE_NAMES = (
     *FEATURE_NAME_GROUPS['eeg'],
     *FEATURE_NAME_GROUPS['ecg'],
 )
+
+
+def _get_feature_cache_root(data_folder):
+    return os.path.join(SCRIPT_DIR, FEATURE_CACHE_FOLDER_NAME)
 
 
 def _coerce_feature_vector(features):
@@ -108,14 +112,16 @@ def _load_required_signal_data(edf_path, csv_path):
 
 
 def _get_feature_cache_file(data_folder, site_id, patient_id, session_id):
-    folder_hash = hashlib.sha1(os.path.abspath(data_folder).encode('utf-8')).hexdigest()[:12]
-    cache_dir = os.path.join(
-        SCRIPT_DIR,
-        FEATURE_CACHE_FOLDER_NAME,
-        folder_hash,
-        site_id,
-    )
+    cache_dir = os.path.join(_get_feature_cache_root(data_folder), site_id)
     return os.path.join(cache_dir, f"{patient_id}_ses-{session_id}.sav")
+
+
+def get_feature_export_dir(data_folder):
+    return os.path.join(_get_feature_cache_root(data_folder), 'exports')
+
+
+def _get_feature_cache_csv_file(cache_file):
+    return f"{os.path.splitext(cache_file)[0]}.csv"
 
 
 def _load_cached_feature_vector(cache_file):
@@ -147,6 +153,15 @@ def _save_cached_feature_vector(cache_file, feature_vector):
     finally:
         if os.path.exists(temp_cache_file):
             os.remove(temp_cache_file)
+
+    csv_file = _get_feature_cache_csv_file(cache_file)
+    temp_csv_file = f"{csv_file}.tmp"
+    try:
+        pd.DataFrame([payload], columns=get_feature_names()).to_csv(temp_csv_file, index=False)
+        os.replace(temp_csv_file, csv_file)
+    finally:
+        if os.path.exists(temp_csv_file):
+            os.remove(temp_csv_file)
 
 
 def extract_demographic_features(data):
