@@ -9,11 +9,20 @@
 #
 ################################################################################
 
-import joblib
+import sys
+
+try:
+    import joblib
+except ModuleNotFoundError as e:
+    raise ModuleNotFoundError(
+        "No module named 'joblib'. This usually means you're running a different Python interpreter than the one you installed packages into.\n\n"
+        f"Active interpreter: {sys.executable}\n\n"
+        "Fix by installing dependencies into *this* interpreter, e.g.:\n"
+        f"  {sys.executable} -m pip install -r requirements.txt\n"
+    ) from e
 import numpy as np
 import os
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-import sys
 from tqdm import tqdm
 
 from helper_code import *
@@ -61,6 +70,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     
     pbar = tqdm(range(num_records), desc="Extracting Features", unit="record", disable=not verbose)
     for i in pbar:
+        patient_id = None
         try:
             # Extract identifiers for this specific record
             record = patient_metadata_list[i]
@@ -114,7 +124,8 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
 
         except Exception as e:
             # If an error occurs (e.g., a record is corrupted), log it and move to the next
-            tqdm.write(f"  !!! Error processing record {i+1} ({patient_id}): {e}")
+            pid = patient_id if patient_id is not None else 'unknown'
+            tqdm.write(f"  !!! Error processing record {i+1} ({pid}): {e}")
             continue
 
     pbar.close()
