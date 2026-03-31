@@ -19,8 +19,8 @@ from tqdm import tqdm
 
 from helper_code import *
 from src.pipeline.config import DEFAULT_CSV_PATH
-from src.pipeline.features import _get_feature_cache_file, get_or_create_record_feature_vector
-from src.pipeline.training import train_xgb_model
+from src.pipeline.features import get_or_create_record_feature_vector
+from src.pipeline.training import predict_ensemble_labels, train_multimodal_ensemble
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -82,7 +82,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose:
         print('Training the model on the data...')
 
-    model = train_xgb_model(data_folder, verbose, csv_path)
+    model = train_multimodal_ensemble(data_folder, verbose, csv_path)
 
     # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
@@ -150,8 +150,9 @@ def run_model(model, record, data_folder, verbose):
     ).reshape(1, -1)
 
     # Get the model outputs.
-    binary_output = model.predict(features)[0]
-    probability_output = model.predict_proba(features)[0][1]
+    labels, probabilities = predict_ensemble_labels(model, features)
+    binary_output = bool(int(labels[0]))
+    probability_output = float(probabilities[0])
 
     if verbose and RUN_MODEL_PBAR is not None:
         RUN_MODEL_PBAR.update(1)

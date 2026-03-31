@@ -7,14 +7,32 @@ import numpy as np
 
 from src.common.channel_utils import normalize_channel_label
 from helper_code import HEADERS, PHYSIOLOGICAL_DATA_SUBFOLDER, load_age, load_sex, load_signal_data
-from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_KEYWORDS, processECG
-from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, processEEG, _get_eeg_aliases
-from src.resp_processing import RESP_FEATURE_LENGTH, processResp, _get_resp_alias_groups
+from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_FEATURE_NAMES, ECG_KEYWORDS, processECG
+from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, EEG_FEATURE_NAMES, processEEG, _get_eeg_aliases
+from src.resp_processing import RESP_FEATURE_LENGTH, RESP_FEATURE_NAMES, processResp, _get_resp_alias_groups
 
 from .config import DEFAULT_CSV_PATH, FEATURE_CACHE_FOLDER_NAME, SCRIPT_DIR, TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH
 
 
 REQUIRED_SIGNAL_ALIASES_CACHE = {}
+DEMOGRAPHIC_FEATURE_NAMES = (
+    'Age',
+    'Sex_Female',
+    'Sex_Male',
+    'Sex_Unknown',
+)
+FEATURE_NAME_GROUPS = {
+    'demographics': DEMOGRAPHIC_FEATURE_NAMES,
+    'resp': tuple(RESP_FEATURE_NAMES),
+    'eeg': tuple(EEG_FEATURE_NAMES),
+    'ecg': tuple(ECG_FEATURE_NAMES),
+}
+FEATURE_NAMES = (
+    *FEATURE_NAME_GROUPS['demographics'],
+    *FEATURE_NAME_GROUPS['resp'],
+    *FEATURE_NAME_GROUPS['eeg'],
+    *FEATURE_NAME_GROUPS['ecg'],
+)
 
 
 def _coerce_feature_vector(features):
@@ -143,6 +161,32 @@ def extract_demographic_features(data):
         sex_vec[2] = 1
 
     return np.concatenate([age, sex_vec])
+
+
+def get_feature_names():
+    return FEATURE_NAMES
+
+
+def get_feature_group_indices(include_demographics=False):
+    groups = {}
+    start = len(FEATURE_NAME_GROUPS['demographics'])
+
+    if include_demographics:
+        demo_indices = np.arange(start, dtype=np.int32)
+    else:
+        demo_indices = np.array([], dtype=np.int32)
+
+    for group_name in ('resp', 'eeg', 'ecg'):
+        group_length = len(FEATURE_NAME_GROUPS[group_name])
+        group_indices = np.arange(start, start + group_length, dtype=np.int32)
+        if include_demographics:
+            groups[group_name] = np.concatenate([demo_indices, group_indices])
+        else:
+            groups[group_name] = group_indices
+        start += group_length
+
+    groups['all'] = np.arange(len(FEATURE_NAMES), dtype=np.int32)
+    return groups
 
 
 def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
