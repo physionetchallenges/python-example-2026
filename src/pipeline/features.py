@@ -11,7 +11,14 @@ from src.ecg_processing import ECG_FEATURE_LENGTH, ECG_FEATURE_NAMES, ECG_KEYWOR
 from src.eeg_processing import EEG_CHANNEL_SPECS, EEG_FEATURE_LENGTH, EEG_FEATURE_NAMES, processEEG, _get_eeg_aliases
 from src.resp_processing import RESP_FEATURE_LENGTH, RESP_FEATURE_NAMES, processResp, _get_resp_alias_groups
 
-from .config import DEFAULT_CSV_PATH, FEATURE_CACHE_FOLDER_NAME, SCRIPT_DIR, TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH
+from .config import (
+    DEFAULT_CSV_PATH,
+    FEATURE_CACHE_FOLDER_NAME,
+    SCRIPT_DIR,
+    SEGMENT_DURATION_SECONDS,
+    SEGMENT_STRIDE_SECONDS,
+    TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH,
+)
 
 
 REQUIRED_SIGNAL_ALIASES_CACHE = {}
@@ -212,39 +219,112 @@ def get_feature_group_indices(include_demographics=False):
     return groups
 
 
+def _iter_signal_segments(physiological_data, physiological_fs):
+    if not physiological_data:
+        return []
+
+    durations = []
+    for label, signal in physiological_data.items():
+        fs = physiological_fs.get(label)
+        if fs is None or fs <= 0:
+            continue
+        durations.append(len(signal) / float(fs))
+
+    if not durations:
+        return []
+
+    max_duration_seconds = max(durations)
+    segment_starts = np.arange(0.0, max_duration_seconds, SEGMENT_STRIDE_SECONDS, dtype=float)
+    segments = []
+
+    for start_seconds in segment_starts:
+        end_seconds = start_seconds + SEGMENT_DURATION_SECONDS
+        segment_data = {}
+        segment_fs = {}
+
+        for label, signal in physiological_data.items():
+            fs = physiological_fs.get(label)
+            if fs is None or fs <= 0:
+                continue
+
+            start_index = int(round(start_seconds * fs))
+            end_index = int(round(end_seconds * fs))
+            if start_index >= len(signal):
+                continue
+
+            sliced_signal = np.asarray(signal[start_index:min(end_index, len(signal))], dtype=float)
+            if sliced_signal.size == 0:
+                continue
+
+            segment_data[label] = sliced_signal
+            segment_fs[label] = fs
+
+        if segment_data:
+            segments.append((segment_data, segment_fs))
+
+    return segments
+
+
+def _aggregate_segment_feature_vectors(feature_vectors, expected_length):
+    if not feature_vectors:
+        return np.full(expected_length, np.nan, dtype=np.float32)
+
+    matrix = np.asarray(feature_vectors, dtype=np.float32)
+    with np.errstate(invalid='ignore'):
+        aggregated = np.nanmean(matrix, axis=0)
+    aggregated = np.asarray(aggregated, dtype=np.float32)
+    aggregated[~np.isfinite(aggregated)] = np.nan
+    return aggregated
+
+
+def _extract_segmented_features(extractor, expected_length, physiological_data, physiological_fs, csv_path):
+    segments = _iter_signal_segments(physiological_data, physiological_fs)
+    if not segments:
+        return np.full(expected_length, np.nan, dtype=np.float32)
+
+    segment_feature_vectors = []
+    for segment_data, segment_fs in segments:
+        try:
+            vector = _extract_optional_features(
+                extractor,
+                expected_length,
+                segment_data,
+                segment_fs,
+                csv_path=csv_path,
+            )
+        except Exception:
+            continue
+
+        if np.all(np.isnan(vector)):
+            continue
+
+        segment_feature_vectors.append(vector)
+
+    return _aggregate_segment_feature_vectors(segment_feature_vectors, expected_length)
+
+
 def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
-    try:
-        resp_features = _extract_optional_features(
-            processResp,
-            RESP_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        resp_features = np.full(RESP_FEATURE_LENGTH, np.nan, dtype=np.float32)
-
-    try:
-        eeg_features = _extract_optional_features(
-            processEEG,
-            EEG_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        eeg_features = np.full(EEG_FEATURE_LENGTH, np.nan, dtype=np.float32)
-
-    try:
-        ecg_features = _extract_optional_features(
-            processECG,
-            ECG_FEATURE_LENGTH,
-            physiological_data,
-            physiological_fs,
-            csv_path=csv_path,
-        )
-    except Exception:
-        ecg_features = np.full(ECG_FEATURE_LENGTH, np.nan, dtype=np.float32)
+    resp_features = _extract_segmented_features(
+        processResp,
+        RESP_FEATURE_LENGTH,
+        physiological_data,
+        physiological_fs,
+        csv_path,
+    )
+    eeg_features = _extract_segmented_features(
+        processEEG,
+        EEG_FEATURE_LENGTH,
+        physiological_data,
+        physiological_fs,
+        csv_path,
+    )
+    ecg_features = _extract_segmented_features(
+        processECG,
+        ECG_FEATURE_LENGTH,
+        physiological_data,
+        physiological_fs,
+        csv_path,
+    )
 
     return np.hstack([resp_features, eeg_features, ecg_features]).astype(np.float32)
 
