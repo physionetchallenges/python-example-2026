@@ -21,11 +21,13 @@ except ModuleNotFoundError as e:
 import numpy as np
 import pandas as pd
 from scipy.signal import welch
+from sklearn.base import clone
 from sklearn.dummy import DummyClassifier
-from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, RandomForestClassifier, VotingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -54,7 +56,10 @@ DEFAULT_RANDOM_STATE = 56
 MAX_SIGNAL_SAMPLES = 120_000
 SPECTRAL_MIN_SAMPLES = 128
 MODEL_THRESHOLD = 0.5
-USE_PHYSIOLOGY_FEATURES = False
+USE_PHYSIOLOGY_FEATURES = True
+MAX_CV_SPLITS = 5
+MODEL_SELECTION_TOLERANCE = 0.01
+ENABLED_PHYSIOLOGY_MODALITIES = ("eeg", "eog", "ecg", "resp", "spo2")
 
 MODALITY_CANDIDATES = (
     ("eeg", ("f3-m2", "f4-m1", "c3-m2", "c4-m1", "o1-m2", "o2-m1")),
@@ -82,7 +87,10 @@ BIPOLAR_CONFIGS = (
 
 DEMOGRAPHIC_FEATURE_DIM = 15
 SIGNAL_SUMMARY_DIM = 15
-PHYSIOLOGICAL_FEATURE_DIM = len(MODALITY_CANDIDATES) * SIGNAL_SUMMARY_DIM if USE_PHYSIOLOGY_FEATURES else 0
+ACTIVE_MODALITY_CANDIDATES = tuple(
+    (name, candidates) for name, candidates in MODALITY_CANDIDATES if name in ENABLED_PHYSIOLOGY_MODALITIES
+)
+PHYSIOLOGICAL_FEATURE_DIM = len(ACTIVE_MODALITY_CANDIDATES) * SIGNAL_SUMMARY_DIM if USE_PHYSIOLOGY_FEATURES else 0
 ALGORITHMIC_FEATURE_DIM = 18
 
 
@@ -111,6 +119,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
 
     features = []
     labels = []
+    groups = []
 
     iterator = tqdm(patient_metadata_list, desc="Extracting Features", unit="record", disable=not verbose)
     for record in iterator:
@@ -122,7 +131,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
             iterator.set_postfix({"patient": patient_id})
 
         try:
-            metadata = metadata_lookup.get((patient_id, session_id), {})
+            metadata = metadata_lookup.get(make_record_key(site_id, patient_id, session_id), {})
             feature_vector = build_feature_vector(
                 metadata=metadata,
                 data_folder=data_folder,
@@ -136,6 +145,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
             if label in (0, 1):
                 features.append(feature_vector)
                 labels.append(label)
+                groups.append(make_group_id(site_id, patient_id))
         except Exception as exc:
             tqdm.write(f"  !!! Error processing record {patient_id} (session {session_id}): {exc}")
             continue
@@ -148,17 +158,18 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
 
     features = np.asarray(features, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.int8)
+    groups = np.asarray(groups, dtype=object)
 
     if verbose:
         print("Selecting and training the model...")
 
-    model_name, model, cv_auc = select_and_fit_model(features, labels, verbose)
+    model_name, model, cv_auc, threshold = select_and_fit_model(features, labels, groups, verbose)
 
     artifact = {
         "model": model,
         "model_name": model_name,
         "cv_auc": cv_auc,
-        "threshold": MODEL_THRESHOLD,
+        "threshold": threshold,
         "feature_dim": int(features.shape[1]),
         "feature_version": 2,
     }
@@ -171,6 +182,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
             print(f"Selected model: {model_name}")
         else:
             print(f"Selected model: {model_name} (mean CV AUROC {cv_auc:.4f})")
+        print(f"Decision threshold: {threshold:.3f}")
         print("Done.")
         print()
 
@@ -190,7 +202,7 @@ def run_model(model, record, data_folder, verbose):
     session_id = normalize_identifier(record.get(HEADERS["session_id"]))
 
     demographics_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-    metadata = load_metadata_row(demographics_file, patient_id, session_id)
+    metadata = load_metadata_row(demographics_file, site_id, patient_id, session_id)
 
     features = build_feature_vector(
         metadata=metadata,
@@ -322,7 +334,7 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
         processed_fs[target] = float(fs_values[0])
 
     features = []
-    for _, candidates in MODALITY_CANDIDATES:
+    for _, candidates in ACTIVE_MODALITY_CANDIDATES:
         summaries = []
         for candidate in candidates:
             if candidate not in processed_channels:
@@ -468,37 +480,45 @@ def extract_algorithmic_annotations_features(algo_data):
 #
 ################################################################################
 
-def select_and_fit_model(features, labels, verbose):
+def select_and_fit_model(features, labels, groups, verbose):
     unique_labels, counts = np.unique(labels, return_counts=True)
     if unique_labels.size < 2:
         constant_label = int(unique_labels[0])
         model = DummyClassifier(strategy="constant", constant=constant_label)
         model.fit(features, labels)
-        return "constant_dummy", model, None
+        return "constant_dummy", model, None, MODEL_THRESHOLD
 
     candidate_factories = get_candidate_factories()
+    candidate_map = {name: factory for name, factory in candidate_factories}
     best_name = "extra_trees"
     best_score = -np.inf
     best_model = None
 
-    cv_splits = int(min(5, counts.min()))
-    if cv_splits >= 2:
-        splitter = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=DEFAULT_RANDOM_STATE)
+    splitters = build_cv_splitters(labels, groups)
+    for splitter in splitters:
+        splitter_scored = False
         for name, factory in candidate_factories:
-            candidate = factory()
             try:
-                scores = cross_val_score(candidate, features, labels, cv=splitter, scoring="roc_auc", n_jobs=1)
+                candidate = factory()
+                if splitter["kind"] == "group":
+                    scores = evaluate_grouped_auc(candidate, features, labels, groups, splitter["cv"])
+                else:
+                    scores = cross_val_score(candidate, features, labels, cv=splitter["cv"], scoring="roc_auc", n_jobs=1)
                 score = float(np.mean(scores))
+                splitter_scored = True
                 if verbose:
-                    print(f"  {name}: mean CV AUROC {score:.4f}")
+                    print(f"  {name}: mean CV AUROC {score:.4f} ({splitter['label']})")
             except Exception as exc:
                 if verbose:
                     print(f"  {name}: CV failed ({exc})")
                 continue
 
-            if score > best_score:
+            if is_better_model(name, score, best_name, best_score):
                 best_name = name
                 best_score = score
+
+        if splitter_scored:
+            break
 
     if best_score == -np.inf:
         best_score = None
@@ -512,27 +532,55 @@ def select_and_fit_model(features, labels, verbose):
         best_model = candidate_factories[0][1]()
         best_name = candidate_factories[0][0]
 
+    threshold = estimate_optimal_threshold(candidate_map[best_name], features, labels, groups, verbose)
     best_model.fit(features, labels)
-    return best_name, best_model, best_score
+    return best_name, best_model, best_score, threshold
 
 
 def get_candidate_factories():
+    def extra_trees_base():
+        return ExtraTreesClassifier(
+            n_estimators=500,
+            max_depth=12,
+            min_samples_leaf=3,
+            min_samples_split=8,
+            max_features="sqrt",
+            class_weight="balanced",
+            random_state=DEFAULT_RANDOM_STATE,
+            n_jobs=1,
+        )
+
+    def random_forest_base():
+        return RandomForestClassifier(
+            n_estimators=500,
+            max_depth=10,
+            min_samples_leaf=3,
+            min_samples_split=8,
+            max_features="sqrt",
+            class_weight="balanced_subsample",
+            random_state=DEFAULT_RANDOM_STATE,
+            n_jobs=1,
+        )
+
+    def hist_gradient_boosting_base():
+        return HistGradientBoostingClassifier(
+            learning_rate=0.04,
+            max_iter=250,
+            max_depth=4,
+            max_leaf_nodes=31,
+            min_samples_leaf=24,
+            l2_regularization=0.5,
+            early_stopping=False,
+            random_state=DEFAULT_RANDOM_STATE,
+        )
+
     def extra_trees():
         return Pipeline(
             [
                 ("imputer", SimpleImputer(strategy="median")),
                 (
                     "model",
-                    ExtraTreesClassifier(
-                        n_estimators=400,
-                        max_depth=None,
-                        min_samples_leaf=2,
-                        min_samples_split=6,
-                        max_features="sqrt",
-                        class_weight="balanced",
-                        random_state=DEFAULT_RANDOM_STATE,
-                        n_jobs=1,
-                    ),
+                    extra_trees_base(),
                 ),
             ]
         )
@@ -543,16 +591,7 @@ def get_candidate_factories():
                 ("imputer", SimpleImputer(strategy="median")),
                 (
                     "model",
-                    RandomForestClassifier(
-                        n_estimators=400,
-                        max_depth=None,
-                        min_samples_leaf=2,
-                        min_samples_split=6,
-                        max_features="sqrt",
-                        class_weight="balanced_subsample",
-                        random_state=DEFAULT_RANDOM_STATE,
-                        n_jobs=1,
-                    ),
+                    random_forest_base(),
                 ),
             ]
         )
@@ -563,15 +602,7 @@ def get_candidate_factories():
                 ("imputer", SimpleImputer(strategy="median")),
                 (
                     "model",
-                    HistGradientBoostingClassifier(
-                        learning_rate=0.035,
-                        max_depth=6,
-                        max_leaf_nodes=31,
-                        min_samples_leaf=20,
-                        l2_regularization=0.1,
-                        early_stopping=False,
-                        random_state=DEFAULT_RANDOM_STATE,
-                    ),
+                    hist_gradient_boosting_base(),
                 ),
             ]
         )
@@ -584,7 +615,7 @@ def get_candidate_factories():
                 (
                     "model",
                     LogisticRegression(
-                        C=0.7,
+                        C=0.5,
                         class_weight="balanced",
                         max_iter=3000,
                         solver="lbfgs",
@@ -594,7 +625,46 @@ def get_candidate_factories():
             ]
         )
 
+    def voting_ensemble():
+        return Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="median")),
+                (
+                    "model",
+                    VotingClassifier(
+                        estimators=[
+                            ("et", extra_trees_base()),
+                            ("rf", random_forest_base()),
+                            ("hgb", hist_gradient_boosting_base()),
+                            (
+                                "lr",
+                                Pipeline(
+                                    [
+                                        ("scaler", StandardScaler()),
+                                        (
+                                            "model",
+                                            LogisticRegression(
+                                                C=0.5,
+                                                class_weight="balanced",
+                                                max_iter=3000,
+                                                solver="lbfgs",
+                                                random_state=DEFAULT_RANDOM_STATE,
+                                            ),
+                                        ),
+                                    ]
+                                ),
+                            ),
+                        ],
+                        voting="soft",
+                        weights=[3, 2, 3, 1],
+                        n_jobs=1,
+                    ),
+                ),
+            ]
+        )
+
     return [
+        ("voting_ensemble", voting_ensemble),
         ("extra_trees", extra_trees),
         ("random_forest", random_forest),
         ("hist_gradient_boosting", hist_gradient_boosting),
@@ -641,20 +711,207 @@ def build_metadata_lookup(metadata_df):
     lookup = {}
     for _, row in metadata_df.iterrows():
         record = row.to_dict()
+        site_id = normalize_identifier(record.get(HEADERS["site_id"]))
         patient_id = normalize_identifier(record.get(HEADERS["bids_folder"]))
         session_id = normalize_identifier(record.get(HEADERS["session_id"]))
-        lookup[(patient_id, session_id)] = record
+        lookup[make_record_key(site_id, patient_id, session_id)] = record
     return lookup
 
 
-def load_metadata_row(demographics_file, patient_id, session_id):
+def load_metadata_row(demographics_file, site_id, patient_id, session_id):
     metadata_df = pd.read_csv(demographics_file)
+    site_series = metadata_df[HEADERS["site_id"]].map(normalize_identifier)
     patient_series = metadata_df[HEADERS["bids_folder"]].map(normalize_identifier)
     session_series = metadata_df[HEADERS["session_id"]].map(normalize_identifier)
-    row = metadata_df[(patient_series == patient_id) & (session_series == session_id)]
+    row = metadata_df[
+        (site_series == site_id)
+        & (patient_series == patient_id)
+        & (session_series == session_id)
+    ]
     if row.empty:
         return {}
     return row.iloc[0].to_dict()
+
+
+def make_record_key(site_id, patient_id, session_id):
+    return (normalize_identifier(site_id), normalize_identifier(patient_id), normalize_identifier(session_id))
+
+
+def make_group_id(site_id, patient_id):
+    return f"{normalize_identifier(site_id)}::{normalize_identifier(patient_id)}"
+
+
+def is_better_model(candidate_name, candidate_score, best_name, best_score):
+    if candidate_score > best_score + MODEL_SELECTION_TOLERANCE:
+        return True
+    if abs(candidate_score - best_score) <= MODEL_SELECTION_TOLERANCE:
+        return get_model_priority(candidate_name) < get_model_priority(best_name)
+    return False
+
+
+def get_model_priority(model_name):
+    priorities = {
+        "logistic_regression": 0,
+        "hist_gradient_boosting": 1,
+        "voting_ensemble": 2,
+        "random_forest": 3,
+        "extra_trees": 4,
+        "constant_dummy": 5,
+    }
+    return priorities.get(model_name, 99)
+
+
+def build_cv_splitters(labels, groups):
+    labels = np.asarray(labels)
+    groups = np.asarray(groups, dtype=object)
+
+    splitters = []
+    unique_groups = np.unique(groups)
+    cv_splits = int(min(MAX_CV_SPLITS, np.unique(labels, return_counts=True)[1].min()))
+
+    if unique_groups.size >= 2 and unique_groups.size < labels.size:
+        group_splits = int(min(MAX_CV_SPLITS, unique_groups.size))
+        if group_splits >= 2:
+            splitters.append({
+                "kind": "group",
+                "cv": GroupKFold(n_splits=group_splits),
+                "label": f"grouped {group_splits}-fold CV",
+            })
+
+    if cv_splits >= 2:
+        splitters.append({
+            "kind": "stratified",
+            "cv": StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=DEFAULT_RANDOM_STATE),
+            "label": f"stratified {cv_splits}-fold CV",
+        })
+
+    return splitters
+
+
+def evaluate_grouped_auc(candidate, features, labels, groups, splitter):
+    scores = []
+    for train_idx, test_idx in splitter.split(features, labels, groups):
+        train_labels = labels[train_idx]
+        test_labels = labels[test_idx]
+        if np.unique(train_labels).size < 2 or np.unique(test_labels).size < 2:
+            continue
+
+        estimator = clone(candidate)
+        estimator.fit(features[train_idx], train_labels)
+
+        if hasattr(estimator, "predict_proba"):
+            probabilities = np.asarray(estimator.predict_proba(features[test_idx]), dtype=np.float64)
+            if probabilities.ndim != 2 or probabilities.shape[1] < 2:
+                continue
+            classes = getattr(estimator, "classes_", None)
+            positive_index = 1
+            if classes is not None and 1 in classes:
+                positive_index = list(classes).index(1)
+            fold_outputs = probabilities[:, positive_index]
+        elif hasattr(estimator, "decision_function"):
+            fold_outputs = np.ravel(estimator.decision_function(features[test_idx]))
+        else:
+            fold_outputs = np.ravel(estimator.predict(features[test_idx]))
+
+        scores.append(float(roc_auc_score(test_labels, fold_outputs)))
+
+    if not scores:
+        raise ValueError("Grouped CV produced no valid folds with both classes present.")
+
+    return np.asarray(scores, dtype=np.float64)
+
+
+def estimate_optimal_threshold(candidate_factory, features, labels, groups, verbose):
+    for splitter in build_cv_splitters(labels, groups):
+        try:
+            candidate = candidate_factory()
+            probabilities = generate_oof_probabilities(candidate, features, labels, groups, splitter)
+            threshold = choose_decision_threshold(labels, probabilities)
+            if verbose:
+                print(f"  threshold tuned at {threshold:.3f} using {splitter['label']}")
+            return threshold
+        except Exception as exc:
+            if verbose:
+                print(f"  threshold tuning failed ({splitter['label']}: {exc})")
+
+    return MODEL_THRESHOLD
+
+
+def generate_oof_probabilities(candidate, features, labels, groups, splitter):
+    probabilities = np.full(len(labels), np.nan, dtype=np.float64)
+
+    if splitter["kind"] == "group":
+        fold_iterator = splitter["cv"].split(features, labels, groups)
+    else:
+        fold_iterator = splitter["cv"].split(features, labels)
+
+    for train_idx, test_idx in fold_iterator:
+        train_labels = labels[train_idx]
+        if np.unique(train_labels).size < 2:
+            raise ValueError("a training fold has only one class")
+
+        estimator = clone(candidate)
+        estimator.fit(features[train_idx], train_labels)
+        probabilities[test_idx] = predict_probability_scores(estimator, features[test_idx])
+
+    if np.any(~np.isfinite(probabilities)):
+        raise ValueError("OOF probability generation did not cover every sample")
+
+    return probabilities
+
+
+def choose_decision_threshold(labels, probabilities):
+    labels = np.asarray(labels, dtype=np.int8)
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+
+    quantile_grid = np.quantile(probabilities, np.linspace(0.1, 0.9, 17))
+    threshold_grid = np.unique(
+        np.clip(
+            np.concatenate(([0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70], quantile_grid)),
+            0.05,
+            0.95,
+        )
+    )
+
+    best_threshold = MODEL_THRESHOLD
+    best_score = -np.inf
+
+    for threshold in threshold_grid:
+        predictions = (probabilities >= threshold).astype(np.int8)
+        score = float(balanced_accuracy_score(labels, predictions))
+        if score > best_score + 1e-12:
+            best_threshold = float(threshold)
+            best_score = score
+        elif abs(score - best_score) <= 1e-12 and abs(float(threshold) - 0.5) < abs(best_threshold - 0.5):
+            best_threshold = float(threshold)
+
+    return best_threshold
+
+
+def predict_probability_scores(model, features):
+    features = sanitize_feature_vector(np.asarray(features, dtype=np.float32))
+
+    if hasattr(model, "predict_proba"):
+        probabilities = np.asarray(model.predict_proba(features), dtype=np.float64)
+        if probabilities.ndim == 2 and probabilities.shape[0] > 0:
+            if probabilities.shape[1] == 1:
+                classes = getattr(model, "classes_", None)
+                positive_class = int(classes[0]) if classes is not None and len(classes) == 1 else 0
+                score = 1.0 if positive_class == 1 else 0.0
+                return np.full(features.shape[0], score, dtype=np.float64)
+
+            classes = getattr(model, "classes_", None)
+            positive_index = 1
+            if classes is not None and 1 in classes:
+                positive_index = list(classes).index(1)
+            return np.clip(probabilities[:, positive_index], 0.0, 1.0)
+
+    if hasattr(model, "decision_function"):
+        scores = np.ravel(model.decision_function(features))
+        return 1.0 / (1.0 + np.exp(-scores))
+
+    predictions = np.ravel(model.predict(features)).astype(np.float64)
+    return np.clip(predictions, 0.0, 1.0)
 
 
 def normalize_identifier(value):
