@@ -12,15 +12,21 @@ def compute_ecg_features(ecg_signal, fs, ecg_feature_length):
     if fs <= 0:
         return None
 
+    signal_duration_seconds = len(ecg_signal) / fs
+
     ecg_signal = ecg_signal - np.mean(ecg_signal)
 
     target_fs = 200
-    length_ecg=len(ecg_signal)
+    length_ecg = len(ecg_signal)
     
     if fs != target_fs:
         num_samples = int(length_ecg * target_fs / fs)
         ecg_signal = resample(ecg_signal, num_samples)
         fs = target_fs
+
+    length_ecg = len(ecg_signal)
+    window_length_seconds = max(1, int(signal_duration_seconds))
+    minimum_intervals_per_window = max(1, int(np.ceil(window_length_seconds / 2)))
 
     if np.sum(np.isnan(ecg_signal)) != 0 or np.sum(ecg_signal == 0) > 0.2 * length_ecg:
         return np.full(ecg_feature_length, np.nan, dtype=np.float32)
@@ -36,7 +42,7 @@ def compute_ecg_features(ecg_signal, fs, ecg_feature_length):
 
     _, r_locs, _ = pan_tompkins(ecg_signal, fs, 0)
 
-    if len(r_locs) < 150:
+    if len(r_locs) - 1 < minimum_intervals_per_window:
         return np.full(ecg_feature_length, np.nan, dtype=np.float32)
 
     nn_intervals = np.diff(r_locs) / fs
@@ -44,13 +50,16 @@ def compute_ecg_features(ecg_signal, fs, ecg_feature_length):
     nn_intervals, ectopic_perc = remove_ectopic_beats(nn_intervals, 40, 0.10)
     nn_intervals = interpolate_nn_pchip(nn_intervals, 2)
 
+    if len(nn_intervals) == 0:
+        return np.full(ecg_feature_length, np.nan, dtype=np.float32)
+
     valid_ratio = np.sum(~np.isnan(nn_intervals)) / len(nn_intervals)
     nn_intervals = nn_intervals[~np.isnan(nn_intervals)]
 
-    if valid_ratio < 0.75 or len(nn_intervals) == 0:
+    if valid_ratio < 0.75 or len(nn_intervals) < minimum_intervals_per_window:
         return np.full(ecg_feature_length, np.nan, dtype=np.float32)
 
-    metrics = compute_hrv_hrf(nn_intervals, fs, length_ecg)
+    metrics = compute_hrv_hrf(nn_intervals, fs)
 
     features = np.array([
         metrics["PIP"],
