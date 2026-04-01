@@ -98,7 +98,7 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency):
 
         frequencies = np.linspace(0.01, 0.5, 1000)
         angular_frequencies = 2 * np.pi * frequencies
-        detrended_nn = window_nn - np.mean(window_nn)
+        detrended_nn = window_nn - np.nanmean(window_nn)
 
         power_spectrum = lombscargle(window_time, detrended_nn, angular_frequencies, normalize=True)
 
