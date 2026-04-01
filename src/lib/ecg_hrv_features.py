@@ -57,7 +57,7 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency, length_ecg):
         pnnls = np.nan
         pnnss = np.nan
 
-    window_length = int(length_ecg / fs) 
+    window_length = int(length_ecg / sampling_frequency) 
     minimum_intervals_per_window = window_length / 2
 
     elapsed_time = np.cumsum(nn_intervals)
