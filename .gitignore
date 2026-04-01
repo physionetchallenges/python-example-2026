@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+.venv/
+.venv311/
+.venv313/
+
+model/
+holdout_outputs/
+training_data/
+holdout_data/
+scores.txt

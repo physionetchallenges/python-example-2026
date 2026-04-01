@@ -83,10 +83,10 @@ def evaluate_model(labels_file, predictions_file):
         label = df_labels.loc[patient, id_labels]
         labels[i] = label
         if patient in df_predictions.index:   # Set missing predictions to 0.
-            binary_prediction = float(df_predictions.loc[patient, id_binary_predictions])
+            binary_prediction = float(np.real(df_predictions.loc[patient, id_binary_predictions]))
             if binary_prediction == 0 or binary_prediction == 1:   # Set invalid binary predictions to 0.
                 binary_predictions[i] = binary_prediction
-            probability_prediction = float(df_predictions.loc[patient, id_probability_predictions])
+            probability_prediction = float(np.real(df_predictions.loc[patient, id_probability_predictions]))
             if np.isfinite(probability_prediction):   # Set invalid probability predictions to 0.
                 probability_predictions[i] = probability_prediction
 
