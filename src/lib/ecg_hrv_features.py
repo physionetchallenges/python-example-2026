@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.signal import lombscargle
 
-def compute_hrv_hrf(nn_intervals, sampling_frequency):
+def compute_hrv_hrf(nn_intervals, sampling_frequency, length_ecg):
     """Compute time-domain and HF HRV metrics from NN intervals."""
 
     nn_intervals = np.asarray(nn_intervals).flatten()
@@ -57,7 +57,7 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency):
         pnnls = np.nan
         pnnss = np.nan
 
-    window_length = 300
+    window_length = int(length_ecg / fs) 
     minimum_intervals_per_window = window_length / 2
 
     elapsed_time = np.cumsum(nn_intervals)
