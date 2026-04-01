@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.integrate import trapezoid
 from scipy.signal import lombscargle
 
 def compute_hrv_hrf(nn_intervals, sampling_frequency):
@@ -57,58 +58,22 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency):
         pnnls = np.nan
         pnnss = np.nan
 
-    window_length = 300
+    avnn = np.nanmean(nn_intervals) if len(nn_intervals) > 0 else np.nan
+    sdnn = np.nanstd(nn_intervals, ddof=1) if len(nn_intervals) > 1 else np.nan
 
-    elapsed_time = np.cumsum(nn_intervals)
+    diff_nn = np.diff(nn_intervals)
+    rmssd = np.sqrt(np.nanmean(diff_nn**2)) if len(diff_nn) > 0 else np.nan
 
-    avnn_values = []
-    sdnn_values = []
-    rmssd_values = []
-
-    index = 0
-    while index < len(nn_intervals):
-        window_start = elapsed_time[index]
-        window_end = window_start + window_length
-
-        window_indices = np.where((elapsed_time >= window_start) & (elapsed_time < window_end))[0]
-
-        if len(window_indices) >= 150:
-            window_nn = nn_intervals[window_indices]
-
-            avnn_values.append(np.nanmean(window_nn))
-            sdnn_values.append(np.nanstd(window_nn, ddof=1))
-
-            diff_nn = np.diff(window_nn)
-            rmssd_values.append(np.sqrt(np.nanmean(diff_nn**2)))
-
-        next_indices = np.where(elapsed_time >= window_end)[0]
-        if len(next_indices) == 0:
-            break
-        index = next_indices[0]
-
-    avnn = np.nanmean(avnn_values) if len(avnn_values) > 0 else np.nan
-    sdnn = np.nanmean(sdnn_values) if len(sdnn_values) > 0 else np.nan
-    rmssd = np.nanmean(rmssd_values) if len(rmssd_values) > 0 else np.nan
-
-    hf_values = []
-
-    for _ in range(len(avnn_values)):
-        window_nn = nn_intervals.copy()
-        window_time = np.cumsum(window_nn)
-
+    if len(nn_intervals) > 1:
+        elapsed_time = np.cumsum(nn_intervals)
         frequencies = np.linspace(0.01, 0.5, 1000)
         angular_frequencies = 2 * np.pi * frequencies
-        detrended_nn = window_nn - np.nanmean(window_nn)
-
-        power_spectrum = lombscargle(window_time, detrended_nn, angular_frequencies, normalize=True)
-
+        detrended_nn = nn_intervals - np.nanmean(nn_intervals)
+        power_spectrum = lombscargle(elapsed_time, detrended_nn, angular_frequencies, normalize=True)
         hf_band = (frequencies >= 0.15) & (frequencies <= 0.4)
-
-        hf_power = np.trapezoid(power_spectrum[hf_band], frequencies[hf_band])
-
-        hf_values.append(hf_power)
-
-    hf = np.nanmean(hf_values) if len(hf_values) > 0 else np.nan
+        hf = trapezoid(power_spectrum[hf_band], frequencies[hf_band])
+    else:
+        hf = np.nan
 
     results = {
         "PIP": pip,

@@ -4,25 +4,19 @@ from src.common.channel_utils import normalize_channel_label
 
 ECG_KEYWORDS = ['ecg', 'ekg']
 
-ECG_FEATURE_NAMES = [
-        "PIP_med",
-        "PIP_std",
-        "PNNLS_med",
-        "PNNLS_std",
-        "PNNSS_med",
-        "PNNSS_std",
-        "AVNN_med",
-        "AVNN_std",
-        "SDNN_med",
-        "SDNN_std",
-        "RMSSD_med",
-        "RMSSD_std",
-        "HF_med",
-        "HF_std",
-        "ECTOPIC_med",
-        "ECTOPIC_std"
+ECG_SEGMENT_FEATURE_NAMES = [
+    "PIP",
+    "PNNLS",
+    "PNNSS",
+    "AVNN",
+    "SDNN",
+    "RMSSD",
+    "HF",
+    "ECTOPIC"
 ]
-ECG_FEATURE_LENGTH = len(ECG_FEATURE_NAMES)
+ECG_SEGMENT_FEATURE_LENGTH = len(ECG_SEGMENT_FEATURE_NAMES)
+ECG_FEATURE_NAMES = ECG_SEGMENT_FEATURE_NAMES
+ECG_FEATURE_LENGTH = ECG_SEGMENT_FEATURE_LENGTH
 
 def _find_ecg_channel(physiological_data):
     for label in physiological_data.keys():
@@ -33,7 +27,7 @@ def _find_ecg_channel(physiological_data):
 
 
 def processECG(physiological_data, physiological_fs, csv_path):
-    results = np.full(ECG_FEATURE_LENGTH, np.nan, dtype=np.float32)
+    results = np.full(ECG_SEGMENT_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     ecg_label = _find_ecg_channel(physiological_data)
 
@@ -50,7 +44,7 @@ def processECG(physiological_data, physiological_fs, csv_path):
         return results
 
     try:
-        values = compute_ecg_features(ecg_signal, fs, ECG_FEATURE_LENGTH)
+        values = compute_ecg_features(ecg_signal, fs, ECG_SEGMENT_FEATURE_LENGTH)
 
         if values is None or len(values) == 0:
             return results
@@ -58,8 +52,8 @@ def processECG(physiological_data, physiological_fs, csv_path):
         values = np.asarray(values, dtype=np.float32)
         values[~np.isfinite(values)] = np.nan
 
-        if len(values) >= ECG_FEATURE_LENGTH:
-            results[:] = values[:ECG_FEATURE_LENGTH]
+        if len(values) >= ECG_SEGMENT_FEATURE_LENGTH:
+            results[:] = values[:ECG_SEGMENT_FEATURE_LENGTH]
         else:
             results[:len(values)] = values
 

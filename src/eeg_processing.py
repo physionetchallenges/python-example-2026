@@ -61,8 +61,10 @@ EEG_FEATURE_SPECS = [
     ('F3-M2', 'variability_Delta'),
     ('F4-M1', 'variability_Delta'),
 ]
-EEG_FEATURE_NAMES = [f'{channel}_{metric}' for channel, metric in EEG_FEATURE_SPECS]
-EEG_FEATURE_LENGTH = len(EEG_FEATURE_NAMES)
+EEG_SEGMENT_FEATURE_NAMES = [f'{channel}_{metric}' for channel, metric in EEG_FEATURE_SPECS]
+EEG_SEGMENT_FEATURE_LENGTH = len(EEG_SEGMENT_FEATURE_NAMES)
+EEG_FEATURE_NAMES = EEG_SEGMENT_FEATURE_NAMES
+EEG_FEATURE_LENGTH = EEG_SEGMENT_FEATURE_LENGTH
 EEG_ALIASES_CACHE = {}
 
 
@@ -167,7 +169,7 @@ def processEEG(physiological_data, physiological_fs, csv_path):
             channel_profiles[channel_name] = metrics
 
     if not channel_profiles:
-        return np.full(EEG_FEATURE_LENGTH, np.nan, dtype=np.float32)
+        return np.full(EEG_SEGMENT_FEATURE_LENGTH, np.nan, dtype=np.float32)
 
     values = []
     for channel_name, metric_name in EEG_FEATURE_SPECS:
