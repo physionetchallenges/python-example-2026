@@ -17,28 +17,43 @@ from .config import (
     SCRIPT_DIR,
     SEGMENT_DURATION_SECONDS,
     SEGMENT_STRIDE_SECONDS,
-    TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH,
 )
 
 
 REQUIRED_SIGNAL_ALIASES_CACHE = {}
+SEGMENT_AGGREGATION_NAMES = ('Max', 'Min', 'Mean', 'Median', 'Std')
 DEMOGRAPHIC_FEATURE_NAMES = (
     'Age',
     'Sex_Female',
     'Sex_Male',
     'Sex_Unknown',
 )
+
+
+def _build_aggregated_feature_names(segment_feature_names):
+    return tuple(
+        f'{feature_name}_{aggregation_name}'
+        for feature_name in segment_feature_names
+        for aggregation_name in SEGMENT_AGGREGATION_NAMES
+    )
+
+
 FEATURE_NAME_GROUPS = {
     'demographics': DEMOGRAPHIC_FEATURE_NAMES,
-    'resp': tuple(RESP_FEATURE_NAMES),
-    'eeg': tuple(EEG_FEATURE_NAMES),
-    'ecg': tuple(ECG_FEATURE_NAMES),
+    'resp': _build_aggregated_feature_names(RESP_FEATURE_NAMES),
+    'eeg': _build_aggregated_feature_names(EEG_FEATURE_NAMES),
+    'ecg': _build_aggregated_feature_names(ECG_FEATURE_NAMES),
 }
 FEATURE_NAMES = (
     *FEATURE_NAME_GROUPS['demographics'],
     *FEATURE_NAME_GROUPS['resp'],
     *FEATURE_NAME_GROUPS['eeg'],
     *FEATURE_NAME_GROUPS['ecg'],
+)
+TOTAL_PHYSIOLOGICAL_FEATURE_LENGTH = (
+    len(FEATURE_NAME_GROUPS['resp'])
+    + len(FEATURE_NAME_GROUPS['eeg'])
+    + len(FEATURE_NAME_GROUPS['ecg'])
 )
 
 
@@ -146,7 +161,10 @@ def _load_cached_feature_vector(cache_file):
     if payload is None:
         return None
 
-    return _coerce_feature_vector(payload)
+    vector = _coerce_feature_vector(payload)
+    if vector.size != len(FEATURE_NAMES):
+        return None
+    return vector
 
 
 def _save_cached_feature_vector(cache_file, feature_vector):
@@ -265,22 +283,39 @@ def _iter_signal_segments(physiological_data, physiological_fs):
     return segments
 
 
-def _aggregate_segment_feature_vectors(feature_vectors, expected_length):
+def _aggregate_segment_feature_vectors(feature_vectors, segment_feature_names):
+    aggregated_length = len(segment_feature_names) * len(SEGMENT_AGGREGATION_NAMES)
     if not feature_vectors:
-        return np.full(expected_length, np.nan, dtype=np.float32)
+        return np.full(aggregated_length, np.nan, dtype=np.float32)
 
     matrix = np.asarray(feature_vectors, dtype=np.float32)
-    with np.errstate(invalid='ignore'):
-        aggregated = np.nanmean(matrix, axis=0)
-    aggregated = np.asarray(aggregated, dtype=np.float32)
-    aggregated[~np.isfinite(aggregated)] = np.nan
-    return aggregated
+    aggregated_values = []
+
+    for column_index in range(matrix.shape[1]):
+        column_values = matrix[:, column_index]
+        finite_values = column_values[np.isfinite(column_values)]
+
+        if finite_values.size == 0:
+            aggregated_values.extend([np.nan] * len(SEGMENT_AGGREGATION_NAMES))
+            continue
+
+        aggregated_values.extend([
+            float(np.max(finite_values)),
+            float(np.min(finite_values)),
+            float(np.mean(finite_values)),
+            float(np.median(finite_values)),
+            float(np.std(finite_values)),
+        ])
+
+    return np.asarray(aggregated_values, dtype=np.float32)
 
 
-def _extract_segmented_features(extractor, expected_length, physiological_data, physiological_fs, csv_path):
+def _extract_segmented_features(extractor, segment_feature_names, physiological_data, physiological_fs, csv_path):
+    expected_length = len(segment_feature_names)
     segments = _iter_signal_segments(physiological_data, physiological_fs)
     if not segments:
-        return np.full(expected_length, np.nan, dtype=np.float32)
+        aggregated_length = expected_length * len(SEGMENT_AGGREGATION_NAMES)
+        return np.full(aggregated_length, np.nan, dtype=np.float32)
 
     segment_feature_vectors = []
     for segment_data, segment_fs in segments:
@@ -300,27 +335,27 @@ def _extract_segmented_features(extractor, expected_length, physiological_data, 
 
         segment_feature_vectors.append(vector)
 
-    return _aggregate_segment_feature_vectors(segment_feature_vectors, expected_length)
+    return _aggregate_segment_feature_vectors(segment_feature_vectors, segment_feature_names)
 
 
 def extract_extended_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
     resp_features = _extract_segmented_features(
         processResp,
-        RESP_FEATURE_LENGTH,
+        RESP_FEATURE_NAMES,
         physiological_data,
         physiological_fs,
         csv_path,
     )
     eeg_features = _extract_segmented_features(
         processEEG,
-        EEG_FEATURE_LENGTH,
+        EEG_FEATURE_NAMES,
         physiological_data,
         physiological_fs,
         csv_path,
     )
     ecg_features = _extract_segmented_features(
         processECG,
-        ECG_FEATURE_LENGTH,
+        ECG_FEATURE_NAMES,
         physiological_data,
         physiological_fs,
         csv_path,
