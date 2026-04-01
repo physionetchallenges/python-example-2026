@@ -58,6 +58,7 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency):
         pnnss = np.nan
 
     window_length = 300
+    minimum_intervals_per_window = window_length / 2
 
     elapsed_time = np.cumsum(nn_intervals)
 
@@ -72,7 +73,7 @@ def compute_hrv_hrf(nn_intervals, sampling_frequency):
 
         window_indices = np.where((elapsed_time >= window_start) & (elapsed_time < window_end))[0]
 
-        if len(window_indices) >= 150:
+        if len(window_indices) >= minimum_intervals_per_window:
             window_nn = nn_intervals[window_indices]
 
             avnn_values.append(np.nanmean(window_nn))
