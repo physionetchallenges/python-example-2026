@@ -7,6 +7,9 @@ from .ecg_rr_cleaning import remove_ectopic_beats
 
 
 def compute_ecg_features(ecg_signal, fs, ecg_feature_length):
+    fs = int(round(float(fs)))
+    if fs <= 0:
+        return None
 
     ecg_signal = ecg_signal - np.mean(ecg_signal)
 
