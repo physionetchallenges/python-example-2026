@@ -24,9 +24,7 @@ REQUIRED_SIGNAL_ALIASES_CACHE = {}
 SEGMENT_AGGREGATION_NAMES = ('Max', 'Min', 'Mean', 'Median', 'Std')
 DEMOGRAPHIC_FEATURE_NAMES = (
     'Age',
-    'Sex_Female',
-    'Sex_Male',
-    'Sex_Unknown',
+    'Sex',
 )
 
 
@@ -200,13 +198,13 @@ def extract_demographic_features(data):
     age = np.array([age], dtype=np.float32)
 
     sex = load_sex(data)
-    sex_vec = np.zeros(3, dtype=np.float32)
-    if sex == 'Female':
-        sex_vec[0] = 1
-    elif sex == 'Male':
-        sex_vec[1] = 1
+    if sex == 'Male':
+        sex_value = 1.0
+    elif sex == 'Female':
+        sex_value = 0.0
     else:
-        sex_vec[2] = 1
+        sex_value = np.nan
+    sex_vec = np.array([sex_value], dtype=np.float32)
 
     return np.concatenate([age, sex_vec]).astype(np.float32)
 
@@ -252,7 +250,11 @@ def _iter_signal_segments(physiological_data, physiological_fs):
         return []
 
     max_duration_seconds = max(durations)
-    segment_starts = np.arange(0.0, max_duration_seconds, SEGMENT_STRIDE_SECONDS, dtype=float)
+    last_full_segment_start = max_duration_seconds - SEGMENT_DURATION_SECONDS
+    if last_full_segment_start < 0:
+        return []
+
+    segment_starts = np.arange(0.0, last_full_segment_start + 1e-9, SEGMENT_STRIDE_SECONDS, dtype=float)
     segments = []
 
     for start_seconds in segment_starts:
@@ -267,10 +269,10 @@ def _iter_signal_segments(physiological_data, physiological_fs):
 
             start_index = int(round(start_seconds * fs))
             end_index = int(round(end_seconds * fs))
-            if start_index >= len(signal):
+            if start_index >= len(signal) or end_index > len(signal):
                 continue
 
-            sliced_signal = np.asarray(signal[start_index:min(end_index, len(signal))], dtype=float)
+            sliced_signal = np.asarray(signal[start_index:end_index], dtype=float)
             if sliced_signal.size == 0:
                 continue
 
