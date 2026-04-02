@@ -1,4 +1,4 @@
-from .lib import Resp_features
+from .lib import resp_features
 import numpy as np
 from src.common.channel_utils import get_cached_channel_table, normalize_channel_label, split_channel_aliases
 from src.common.signal_utils import resample_signal
