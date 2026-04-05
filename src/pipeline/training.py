@@ -276,7 +276,8 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     modality_presence_indices = get_feature_group_indices(include_demographics=False)
     preprocessor = _build_preprocessor(len(labels))
     processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
-    threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
+    # threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
+    threshold = 0.5
     models = _fit_ensemble(processed_features, labels, feature_indices)
 
     export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
