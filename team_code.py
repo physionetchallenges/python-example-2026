@@ -15,12 +15,18 @@ import atexit
 import builtins
 import re
 import sys
+
+import numpy as np
 from tqdm import tqdm
 
 from helper_code import *
 from src.pipeline.config import DEFAULT_CSV_PATH
 from src.pipeline.features import get_feature_export_dir, get_or_create_record_feature_vector
-from src.pipeline.training import predict_ensemble_labels, train_multimodal_ensemble
+from src.pipeline.training import (
+    export_feature_views,
+    predict_ensemble_labels,
+    train_multimodal_ensemble,
+)
 ################################################################################
 # Path & Constant Configuration (Added for Robustness)
 ################################################################################
@@ -28,6 +34,7 @@ from src.pipeline.training import predict_ensemble_labels, train_multimodal_ense
 # Progress bar state for run_model (initialized lazily)
 RUN_MODEL_PBAR = None
 RUN_MODEL_PBAR_TOTAL = None
+RUN_MODEL_EXPORT_STATE = None
 ORIGINAL_PRINT = builtins.print
 PRINT_FILTER_ACTIVE = False
 RUN_PROGRESS_LINE_RE = re.compile(r'^-\s+\d+/\d+:\s')
@@ -36,6 +43,28 @@ def _close_run_model_pbar():
     if RUN_MODEL_PBAR is not None:
         RUN_MODEL_PBAR.close()
         RUN_MODEL_PBAR = None
+
+
+def _flush_run_feature_exports():
+    global RUN_MODEL_EXPORT_STATE
+
+    if RUN_MODEL_EXPORT_STATE is None or not RUN_MODEL_EXPORT_STATE['metadata_rows']:
+        return
+
+    feature_exports = export_feature_views(
+        RUN_MODEL_EXPORT_STATE['export_root'],
+        'test',
+        RUN_MODEL_EXPORT_STATE['metadata_rows'],
+        np.asarray(RUN_MODEL_EXPORT_STATE['raw_features'], dtype=np.float32),
+        RUN_MODEL_EXPORT_STATE['feature_names'],
+        preprocessor=RUN_MODEL_EXPORT_STATE['preprocessor'],
+    )
+
+    if RUN_MODEL_EXPORT_STATE['verbose']:
+        print(f"Raw features CSV: {feature_exports.get('raw')}")
+        print(f"Preprocessed features CSV: {feature_exports.get('preprocessed')}")
+
+    RUN_MODEL_EXPORT_STATE = None
 
 
 def _install_run_print_filter():
@@ -61,6 +90,7 @@ def _restore_print():
 
 
 atexit.register(_close_run_model_pbar)
+atexit.register(_flush_run_feature_exports)
 atexit.register(_restore_print)
 
 
@@ -117,7 +147,7 @@ def load_model(model_folder, verbose):
 # Run your trained model. This function is *required*. You should edit this function to add your code, but do *not* change the
 # arguments of this function.
 def run_model(model, record, data_folder, verbose):
-    global RUN_MODEL_PBAR, RUN_MODEL_PBAR_TOTAL
+    global RUN_MODEL_PBAR, RUN_MODEL_PBAR_TOTAL, RUN_MODEL_EXPORT_STATE
 
     # Load the model.
     model = model['model']
@@ -145,6 +175,17 @@ def run_model(model, record, data_folder, verbose):
             disable=not verbose
         )
 
+    if RUN_MODEL_EXPORT_STATE is None:
+        export_root = get_feature_export_dir(data_folder)
+        RUN_MODEL_EXPORT_STATE = {
+            'export_root': export_root,
+            'metadata_rows': [],
+            'raw_features': [],
+            'feature_names': list(model.get('feature_names', [])),
+            'preprocessor': model.get('preprocessor'),
+            'verbose': verbose,
+        }
+
     if verbose and RUN_MODEL_PBAR is not None:
         RUN_MODEL_PBAR.set_postfix({"patient": patient_id})
 
@@ -157,7 +198,15 @@ def run_model(model, record, data_folder, verbose):
         patient_data,
         csv_path=DEFAULT_CSV_PATH,
         require_physiological_data=False,
-    ).reshape(1, -1)
+    )
+    features = np.asarray(features, dtype=np.float32).reshape(1, -1)
+
+    RUN_MODEL_EXPORT_STATE['metadata_rows'].append({
+        'patient_id': patient_id,
+        'site_id': site_id,
+        'session_id': session_id,
+    })
+    RUN_MODEL_EXPORT_STATE['raw_features'].append(features[0])
 
     # Get the model outputs.
     labels, probabilities = predict_ensemble_labels(model, features)
@@ -169,6 +218,10 @@ def run_model(model, record, data_folder, verbose):
         if RUN_MODEL_PBAR_TOTAL is not None and RUN_MODEL_PBAR.n >= RUN_MODEL_PBAR_TOTAL:
             RUN_MODEL_PBAR.close()
             RUN_MODEL_PBAR = None
+
+    if RUN_MODEL_PBAR_TOTAL is not None and RUN_MODEL_EXPORT_STATE is not None:
+        if len(RUN_MODEL_EXPORT_STATE['metadata_rows']) >= RUN_MODEL_PBAR_TOTAL:
+            _flush_run_feature_exports()
 
     return binary_output, probability_output
 

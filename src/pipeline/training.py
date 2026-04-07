@@ -77,13 +77,60 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
         }, None, None, f"Error processing {patient_id}: {exc}"
 
 
-def _export_feature_matrix_csv(output_path, metadata_rows, labels, feature_matrix, feature_names):
+def prepare_feature_matrix(feature_matrix, preprocessor=None):
+    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
+    if raw_feature_matrix.ndim == 1:
+        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
+    raw_feature_matrix = raw_feature_matrix.copy()
+    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
+
+    if preprocessor is not None:
+        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
+    else:
+        processed_feature_matrix = raw_feature_matrix
+
+    return raw_feature_matrix, processed_feature_matrix
+
+
+def export_feature_matrix_csv(output_path, metadata_rows, feature_matrix, feature_names, labels=None):
     dataframe = pd.DataFrame(metadata_rows)
-    dataframe['label'] = labels
+    if labels is not None:
+        dataframe['label'] = labels
+
     feature_frame = pd.DataFrame(feature_matrix, columns=feature_names)
     dataframe = pd.concat([dataframe.reset_index(drop=True), feature_frame.reset_index(drop=True)], axis=1)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     dataframe.to_csv(output_path, index=False)
+
+
+def get_feature_export_paths(export_root, prefix):
+    return {
+        'raw': os.path.join(export_root, f'{prefix}_features_raw.csv'),
+        'preprocessed': os.path.join(export_root, f'{prefix}_features_preprocessed.csv'),
+    }
+
+
+def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, feature_names, preprocessor=None, labels=None):
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=preprocessor,
+    )
+    export_paths = get_feature_export_paths(export_root, prefix)
+    export_feature_matrix_csv(
+        export_paths['raw'],
+        metadata_rows,
+        raw_feature_matrix,
+        feature_names,
+        labels=labels,
+    )
+    export_feature_matrix_csv(
+        export_paths['preprocessed'],
+        metadata_rows,
+        processed_feature_matrix,
+        feature_names,
+        labels=labels,
+    )
+    return export_paths
 
 
 def best_threshold(probabilities, labels):
@@ -149,11 +196,10 @@ def _has_modality_signal(feature_vector, modality_presence_indices):
 
 
 def predict_ensemble_probabilities(model_bundle, feature_matrix):
-    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
-    if raw_feature_matrix.ndim == 1:
-        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
-    raw_feature_matrix = raw_feature_matrix.copy()
-    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=model_bundle.get('preprocessor'),
+    )
 
     models = model_bundle['models']
     feature_indices = {
@@ -164,11 +210,6 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         name: np.asarray(indices, dtype=np.int32)
         for name, indices in model_bundle['modality_presence_indices'].items()
     }
-    preprocessor = model_bundle.get('preprocessor')
-    if preprocessor is not None:
-        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
-    else:
-        processed_feature_matrix = raw_feature_matrix
 
     probabilities = np.zeros(raw_feature_matrix.shape[0], dtype=np.float32)
     for row_index, raw_feature_vector in enumerate(raw_feature_matrix):
@@ -280,12 +321,17 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     threshold = 0.5
     models = _fit_ensemble(processed_features, labels, feature_indices)
 
-    export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
-    raw_feature_export_path = os.path.join(export_root, 'training_features_raw.csv')
-    preprocessed_feature_export_path = os.path.join(export_root, 'training_features_preprocessed.csv')
     feature_names = list(get_feature_names())
-    _export_feature_matrix_csv(raw_feature_export_path, metadata_rows, labels, features, feature_names)
-    _export_feature_matrix_csv(preprocessed_feature_export_path, metadata_rows, labels, processed_features, feature_names)
+    export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
+    feature_exports = export_feature_views(
+        export_root,
+        'training',
+        metadata_rows,
+        features,
+        feature_names,
+        preprocessor=preprocessor,
+        labels=labels,
+    )
 
     return {
         'type': 'multimodal_xgb_ensemble',
@@ -302,8 +348,5 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         },
         'models': models,
         'preprocessor': preprocessor,
-        'feature_exports': {
-            'raw': raw_feature_export_path,
-            'preprocessed': preprocessed_feature_export_path,
-        },
+        'feature_exports': feature_exports,
     }
