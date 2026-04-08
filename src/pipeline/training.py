@@ -1,12 +1,9 @@
 import os
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 from sklearn.impute import KNNImputer
-from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -14,7 +11,16 @@ from xgboost import XGBClassifier
 
 from helper_code import DEMOGRAPHICS_FILE, HEADERS, find_patients, load_label
 
-from .config import MAX_TRAIN_WORKERS
+from .config import (
+    CV_RANDOM_STATE,
+    CV_SEARCH_ITERATIONS,
+    DEFAULT_CV_HYPERPARAMETERS,
+    MAX_TRAIN_WORKERS,
+    OPTIMIZE_HYPERPARAMETER_SEARCH,
+    RANDOM_CV_N_SPLITS,
+    USE_SITE_GROUPED_CV,
+)
+from .cross_validation import CrossValidationConfig, EnsembleCrossValidator, normalize_site_group
 from .features import get_feature_group_indices, get_feature_names, get_or_create_record_feature_vector
 
 
@@ -139,95 +145,6 @@ def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, fea
     return export_paths    
 
 
-def best_threshold(probabilities, labels):
-    thresholds = np.linspace(0, 1, 101)
-    best_score = -1.0
-    best_value = DEFAULT_ENSEMBLE_THRESHOLD
-
-    for threshold in thresholds:
-        predictions = (probabilities >= threshold).astype(np.int32)
-        score = f1_score(labels, predictions, zero_division=0)
-        if score > best_score:
-            best_score = score
-            best_value = float(threshold)
-
-    return best_value
-
-
-def _safe_auroc(labels, probabilities):
-    if len(np.unique(labels)) < 2:
-        return np.nan
-    return float(roc_auc_score(labels, probabilities))
-
-
-def _safe_auprc(labels, probabilities):
-    if len(np.unique(labels)) < 2:
-        return np.nan
-    return float(average_precision_score(labels, probabilities, pos_label=1))
-
-
-def _compute_evaluation_metrics(labels, probabilities, threshold):
-    labels = np.asarray(labels, dtype=np.int32)
-    probabilities = np.asarray(probabilities, dtype=np.float32)
-    predictions = (probabilities >= threshold).astype(np.int32)
-
-    return {
-        'threshold': float(threshold),
-        'auroc': _safe_auroc(labels, probabilities),
-        'auprc': _safe_auprc(labels, probabilities),
-        'accuracy': float(accuracy_score(labels, predictions)),
-        'f1': float(f1_score(labels, predictions, zero_division=0)),
-        'precision': float(precision_score(labels, predictions, zero_division=0)),
-        'recall': float(recall_score(labels, predictions, zero_division=0)),
-    }
-
-
-def _summarize_metrics(metric_rows):
-    summary = {}
-    metric_names = ('auroc', 'auprc', 'accuracy', 'f1', 'precision', 'recall')
-
-    for metric_name in metric_names:
-        metric_values = np.asarray([row[metric_name] for row in metric_rows], dtype=np.float32)
-        finite_values = metric_values[np.isfinite(metric_values)]
-        if finite_values.size == 0:
-            summary[metric_name] = {'mean': None, 'std': None}
-            continue
-
-        summary[metric_name] = {
-            'mean': float(np.mean(finite_values)),
-            'std': float(np.std(finite_values)),
-        }
-
-    return summary
-
-
-def _format_metric_value(value):
-    return 'nan' if value is None or not np.isfinite(value) else f'{value:.3f}'
-
-
-def _print_metrics(prefix, metrics):
-    print(
-        f"{prefix} AUROC={_format_metric_value(metrics['auroc'])}, "
-        f"AUPRC={_format_metric_value(metrics['auprc'])}, "
-        f"Accuracy={_format_metric_value(metrics['accuracy'])}, "
-        f"F1={_format_metric_value(metrics['f1'])}, "
-        f"Precision={_format_metric_value(metrics['precision'])}, "
-        f"Recall={_format_metric_value(metrics['recall'])}, "
-        f"Threshold={metrics['threshold']:.2f}"
-    )
-
-
-def _print_metric_summary(prefix, summary):
-    metric_names = ('auroc', 'auprc', 'accuracy', 'f1', 'precision', 'recall')
-    parts = []
-    for metric_name in metric_names:
-        metric_summary = summary.get(metric_name, {})
-        mean_value = _format_metric_value(metric_summary.get('mean'))
-        std_value = _format_metric_value(metric_summary.get('std'))
-        parts.append(f"{metric_name.upper()}={mean_value} +/- {std_value}")
-    print(f"{prefix} {', '.join(parts)}")
-
-
 def _build_xgb_model(labels, extra_params=None):
    
     neg = int(np.sum(labels == 0))
@@ -257,6 +174,17 @@ def _fit_model(feature_matrix, labels, consensus_params=None):
     model = _build_xgb_model(labels, extra_params=consensus_params)
     model.fit(feature_matrix, labels)
     return model
+
+
+def _build_search_model(labels):
+    return XGBClassifier(
+        scale_pos_weight=(int(np.sum(labels == 0)) / max(int(np.sum(labels == 1)), 1)),
+        n_estimators=500,
+        learning_rate=0.05,
+        random_state=CV_RANDOM_STATE,
+        eval_metric='auc',
+        tree_method='hist',
+    )
 
 
 
@@ -319,42 +247,6 @@ class _CategoricalAwarePreprocessor:
         X_out[:, self._numerical_indices] = X_num_scaled
         return X_out
 
-def _search_hyperparams(X_train, y_train):
-
-    base_model = XGBClassifier(
-        scale_pos_weight=(int(np.sum(y_train == 0)) / max(int(np.sum(y_train == 1)), 1)),
-        n_estimators=500,
-        learning_rate=0.05,
-        random_state=42,
-        eval_metric='auc',
-        tree_method='hist',
-    )
- 
-    search = RandomizedSearchCV(
-        estimator=base_model,
-        param_distributions=PARAM_DIST,
-        n_iter=20,
-        scoring='f1',
-        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
-        random_state=42,
-        n_jobs=-1,
-        refit=False,  # we only need best_params_, not a refitted model
-    )
-    search.fit(X_train, y_train)
-    return search.best_params_
-
-def _consensus_params(params_per_fold):
-
-    consensus = {}
-    for key in PARAM_DIST.keys():
-        values = [p[key] for p in params_per_fold if key in p]
-        if not values:
-            continue
-        # majority vote
-        most_common = Counter(values).most_common(1)[0][0]
-        consensus[key] = most_common
-    return consensus
-
 def _fit_ensemble(feature_matrix, labels, feature_indices, consensus_params=None):
     models = {
         'all': _fit_model(
@@ -414,104 +306,6 @@ def predict_ensemble_labels(model_bundle, feature_matrix):
     labels = (probabilities >= threshold).astype(np.int32)
     return labels, probabilities
 
-def _calibrate_threshold_cv(
-    features,
-    labels,
-    feature_indices,
-    modality_presence_indices,
-    categorical_indices=None,
-    n_splits=5,
-):
-
-    classes, class_counts = np.unique(labels, return_counts=True)
-    if len(classes) != 2 or np.min(class_counts) < n_splits:
-        return DEFAULT_ENSEMBLE_THRESHOLD, None, {
-            'skipped': True,
-            'reason': 'Not enough samples per class to run stratified cross-validation.',
-            'n_splits': int(n_splits),
-        }
- 
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    oof_probabilities = np.zeros(len(labels), dtype=np.float32)
-    best_params_per_fold = []
-    fold_metrics = []
- 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(features, labels)):
-        print(f"  Outer fold {fold_idx + 1}/{n_splits} — hyperparameter search + OOF prediction")
- 
-        X_train, X_val = features[train_idx], features[val_idx]
-        y_train, y_val = labels[train_idx], labels[val_idx]
- 
-        # Fit preprocessor ONLY on fold's training data (no leakage into val)
-        fold_preprocessor = _build_preprocessor(len(y_train), categorical_indices)
-        X_train_proc = np.asarray(fold_preprocessor.fit_transform(X_train), dtype=np.float32)
-        X_val_proc   = np.asarray(fold_preprocessor.transform(X_val),       dtype=np.float32)
- 
-        # Inner CV hyperparameter search on this fold's training data
-        fold_best_params = _search_hyperparams(X_train_proc[:, feature_indices['all']], y_train)
-        best_params_per_fold.append(fold_best_params)
-        print(f"    Best params fold {fold_idx + 1}: {fold_best_params}")
- 
-        # Fit fold ensemble with the fold's best params
-        fold_models = _fit_ensemble(X_train_proc, y_train, feature_indices, consensus_params=fold_best_params)
-        fold_bundle = {
-            'models': fold_models,
-            'feature_indices': feature_indices,
-            'modality_presence_indices': modality_presence_indices,
-            'preprocessor': fold_preprocessor,
-            'threshold': DEFAULT_ENSEMBLE_THRESHOLD,
-        }
- 
-        # Collect out-of-fold probabilities (never seen by this fold's model during training)
-        fold_probabilities = predict_ensemble_probabilities(fold_bundle, X_val)
-        oof_probabilities[val_idx] = fold_probabilities
-
-        fold_metric_row = _compute_evaluation_metrics(
-            y_val,
-            fold_probabilities,
-            threshold=DEFAULT_ENSEMBLE_THRESHOLD,
-        )
-        fold_metric_row.update({
-            'fold': int(fold_idx + 1),
-            'train_size': int(len(train_idx)),
-            'validation_size': int(len(val_idx)),
-        })
-        fold_metrics.append(fold_metric_row)
-        _print_metrics(f"    Fold {fold_idx + 1} metrics:", fold_metric_row)
- 
-    # Aggregate best params across all outer folds by majority vote
-    consensus = _consensus_params(best_params_per_fold)
-    print(f"  Consensus hyperparameters across {n_splits} folds: {consensus}")
-
-    fold_metric_summary = _summarize_metrics(fold_metrics)
-    _print_metric_summary("  Mean fold metrics:", fold_metric_summary)
- 
-    # Threshold calibrated on clean OOF probabilities
-    oof_default_metrics = _compute_evaluation_metrics(
-        labels,
-        oof_probabilities,
-        threshold=DEFAULT_ENSEMBLE_THRESHOLD,
-    )
-    _print_metrics("  OOF metrics before calibration:", oof_default_metrics)
-
-    threshold = best_threshold(oof_probabilities, labels)
-
-    oof_calibrated_metrics = _compute_evaluation_metrics(
-        labels,
-        oof_probabilities,
-        threshold=threshold,
-    )
-    _print_metrics("  OOF metrics after calibration:", oof_calibrated_metrics)
- 
-    return threshold, consensus, {
-        'skipped': False,
-        'n_splits': int(n_splits),
-        'fold_metrics': fold_metrics,
-        'fold_metric_summary': fold_metric_summary,
-        'oof_default_threshold_metrics': oof_default_metrics,
-        'oof_calibrated_metrics': oof_calibrated_metrics,
-    }
-
 
 def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None):
     patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
@@ -567,18 +361,46 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         i for i, name in enumerate(feature_names)
         if name.lower() in ('sex', 'gender')
     ]
+    site_groups = np.asarray([
+        normalize_site_group(metadata_row['site_id'])
+        for metadata_row in metadata_rows
+    ])
+    cv_config = CrossValidationConfig(
+        use_site_grouped_cv=USE_SITE_GROUPED_CV,
+        optimize_hyperparameter_search=OPTIMIZE_HYPERPARAMETER_SEARCH,
+        outer_random_splits=RANDOM_CV_N_SPLITS,
+        random_state=CV_RANDOM_STATE,
+        search_iterations=CV_SEARCH_ITERATIONS,
+        fixed_hyperparameters=DEFAULT_CV_HYPERPARAMETERS,
+    )
+    cv_runner = EnsembleCrossValidator(
+        config=cv_config,
+        param_dist=PARAM_DIST,
+        default_threshold=DEFAULT_ENSEMBLE_THRESHOLD,
+        build_preprocessor=_build_preprocessor,
+        build_search_model=_build_search_model,
+        fit_ensemble=_fit_ensemble,
+        predict_probabilities=predict_ensemble_probabilities,
+    )
     print(f"  Categorical feature indices: {categorical_indices} "
           f"({[feature_names[i] for i in categorical_indices]})")
+    print(f"  Hospital CV groups: {sorted(np.unique(site_groups).tolist())}")
+    print(f"  CV strategy: {'grouped by hospital' if cv_config.use_site_grouped_cv else 'random stratified folds'}")
+    print(f"  Hyperparameter search: {'enabled' if cv_config.optimize_hyperparameter_search else 'disabled'}")
  
     # --- Step 1: Nested CV for threshold calibration and consensus hyperparameters ---
     print("Running nested CV for threshold calibration and hyperparameter consensus...")
-    threshold, consensus, cv_metrics = _calibrate_threshold_cv(
+    cv_result = cv_runner.run(
         features,
         labels,
         feature_indices,
         modality_presence_indices,
         categorical_indices=categorical_indices if categorical_indices else None,
+        site_groups=site_groups,
     )
+    threshold = cv_result.threshold
+    consensus = cv_result.consensus_params
+    cv_metrics = cv_result.metrics
  
     # --- Step 2: Fit final models on ALL data using consensus hyperparameters ---
     print("Fitting final ensemble on all training data with consensus hyperparameters...")
