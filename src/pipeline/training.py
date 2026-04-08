@@ -1,11 +1,12 @@
 import os
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
 from sklearn.impute import KNNImputer
 from sklearn.metrics import f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -20,6 +21,16 @@ from .features import get_feature_group_indices, get_feature_names, get_or_creat
 DEFAULT_ENSEMBLE_THRESHOLD = 0.5
 ENSEMBLE_MODALITIES = ('resp', 'eeg', 'ecg')
 DEFAULT_KNN_NEIGHBORS = 5
+
+# Hyperparameter search space
+PARAM_DIST = {
+    'max_depth':        [3, 4, 5], 
+    'min_child_weight': [1, 2, 3], 
+    'subsample':        [0.7, 0.8, 0.9], 
+    'colsample_bytree': [0.6, 0.7, 0.8], 
+    'reg_lambda':       [0.5, 1.0, 2.0], 
+    'reg_alpha':        [0.0, 0.05, 0.1], 
+}
 
 
 def build_training_metadata_cache(patient_data_file):
@@ -76,14 +87,56 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
             'session_id': session_id,
         }, None, None, f"Error processing {patient_id}: {exc}"
 
+def prepare_feature_matrix(feature_matrix, preprocessor=None):
+    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
+    if raw_feature_matrix.ndim == 1:
+        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
+    raw_feature_matrix = raw_feature_matrix.copy()
+    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
 
-def _export_feature_matrix_csv(output_path, metadata_rows, labels, feature_matrix, feature_names):
+    if preprocessor is not None:
+        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
+    else:
+        processed_feature_matrix = raw_feature_matrix
+
+    return raw_feature_matrix, processed_feature_matrix
+
+def export_feature_matrix_csv(output_path, metadata_rows, feature_matrix, feature_names, labels=None):
     dataframe = pd.DataFrame(metadata_rows)
-    dataframe['label'] = labels
+    if labels is not None:
+        dataframe['label'] = labels
     feature_frame = pd.DataFrame(feature_matrix, columns=feature_names)
     dataframe = pd.concat([dataframe.reset_index(drop=True), feature_frame.reset_index(drop=True)], axis=1)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     dataframe.to_csv(output_path, index=False)
+
+def get_feature_export_paths(export_root, prefix):
+    return {
+        'raw': os.path.join(export_root, f'{prefix}_features_raw.csv'),
+        'preprocessed': os.path.join(export_root, f'{prefix}_features_preprocessed.csv'),
+    }
+    
+def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, feature_names, preprocessor=None, labels=None):
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=preprocessor,
+    )
+    export_paths = get_feature_export_paths(export_root, prefix)
+    export_feature_matrix_csv(
+        export_paths['raw'],
+        metadata_rows,
+        raw_feature_matrix,
+        feature_names,
+        labels=labels,
+    )
+    export_feature_matrix_csv(
+        export_paths['preprocessed'],
+        metadata_rows,
+        processed_feature_matrix,
+        feature_names,
+        labels=labels,
+    )
+    return export_paths    
 
 
 def best_threshold(probabilities, labels):
@@ -97,49 +150,149 @@ def best_threshold(probabilities, labels):
         if score > best_score:
             best_score = score
             best_value = float(threshold)
+        if best_value < 0.5:
+            best_value = 0.5
 
     return best_value
 
 
-def _build_xgb_model(labels):
+def _build_xgb_model(labels, extra_params=None):
+   
     neg = int(np.sum(labels == 0))
     pos = int(np.sum(labels == 1))
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
-
-    return XGBClassifier(
+ 
+    base_params = dict(
         scale_pos_weight=scale_pos_weight,
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
+        n_estimators=500,
+        learning_rate=0.05, 
+        max_depth=4, 
         subsample=0.8,
+        colsample_bytree=0.7,
+        min_child_weight=2, 
+        reg_alpha=0.0,
+        reg_lambda=1.0,
         random_state=42,
         eval_metric='auc',
         tree_method='hist',
     )
+    if extra_params:
+        base_params.update(extra_params)
+ 
+    return XGBClassifier(**base_params)
 
-
-def _fit_model(feature_matrix, labels):
-    model = _build_xgb_model(labels)
+def _fit_model(feature_matrix, labels, consensus_params=None):
+    model = _build_xgb_model(labels, extra_params=consensus_params)
     model.fit(feature_matrix, labels)
     return model
 
 
-def _build_preprocessor(num_samples):
+
+def _build_preprocessor(num_samples, categorical_indices=None):
+
     neighbors = min(DEFAULT_KNN_NEIGHBORS, max(1, num_samples - 1)) if num_samples > 1 else 1
-    return Pipeline([
-        ('imputer', KNNImputer(n_neighbors=neighbors, keep_empty_features=True)),
-        ('scaler', StandardScaler()),
-    ])
+ 
+    if categorical_indices is None or len(categorical_indices) == 0:
+        # Original pipeline — no categorical columns
+        return Pipeline([
+            ('imputer', KNNImputer(n_neighbors=neighbors, keep_empty_features=True)),
+            ('scaler', StandardScaler()),
+        ])
 
+    return _CategoricalAwarePreprocessor(
+        n_neighbors=neighbors,
+        categorical_indices=np.asarray(categorical_indices, dtype=np.int32),
+    )
 
-def _fit_ensemble(feature_matrix, labels, feature_indices):
+class _CategoricalAwarePreprocessor:
+ 
+    def __init__(self, n_neighbors, categorical_indices):
+        self.n_neighbors = n_neighbors
+        self.categorical_indices = categorical_indices
+        self.imputer = KNNImputer(n_neighbors=n_neighbors, keep_empty_features=True)
+        self.scaler = StandardScaler()
+        self._numerical_indices = None  # set during fit
+ 
+    def _get_numerical_indices(self, n_features):
+        all_idx = np.arange(n_features)
+        return np.setdiff1d(all_idx, self.categorical_indices)
+ 
+    def fit_transform(self, X):
+        X = np.asarray(X, dtype=np.float32).copy()
+        X[~np.isfinite(X)] = np.nan
+
+        # Step 1: impute everything
+        X_imputed = np.asarray(self.imputer.fit_transform(X), dtype=np.float32)
+ 
+        # Step 2: fit scaler on numerical columns only
+        self._numerical_indices = self._get_numerical_indices(X.shape[1])
+        X_num = X_imputed[:, self._numerical_indices]
+        X_num_scaled = np.asarray(self.scaler.fit_transform(X_num), dtype=np.float32)
+ 
+        # Step 3: assemble output — categorical columns keep imputed values
+        X_out = X_imputed.copy()
+        X_out[:, self._numerical_indices] = X_num_scaled
+        return X_out
+ 
+    def transform(self, X):
+        X = np.asarray(X, dtype=np.float32).copy()
+        X[~np.isfinite(X)] = np.nan
+ 
+        X_imputed = np.asarray(self.imputer.transform(X), dtype=np.float32)
+ 
+        X_num = X_imputed[:, self._numerical_indices]
+        X_num_scaled = np.asarray(self.scaler.transform(X_num), dtype=np.float32)
+ 
+        X_out = X_imputed.copy()
+        X_out[:, self._numerical_indices] = X_num_scaled
+        return X_out
+
+def _search_hyperparams(X_train, y_train):
+
+    base_model = XGBClassifier(
+        scale_pos_weight=(int(np.sum(y_train == 0)) / max(int(np.sum(y_train == 1)), 1)),
+        n_estimators=500,
+        learning_rate=0.05,
+        random_state=42,
+        eval_metric='auc',
+        tree_method='hist',
+    )
+ 
+    search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=PARAM_DIST,
+        n_iter=20,
+        scoring='f1',
+        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+        random_state=42,
+        n_jobs=-1,
+        refit=False,  # we only need best_params_, not a refitted model
+    )
+    search.fit(X_train, y_train)
+    return search.best_params_
+
+def _consensus_params(params_per_fold):
+
+    consensus = {}
+    for key in PARAM_DIST.keys():
+        values = [p[key] for p in params_per_fold if key in p]
+        if not values:
+            continue
+        # majority vote
+        most_common = Counter(values).most_common(1)[0][0]
+        consensus[key] = most_common
+    return consensus
+
+def _fit_ensemble(feature_matrix, labels, feature_indices, consensus_params=None):
     models = {
-        'all': _fit_model(feature_matrix[:, feature_indices['all']], labels),
+        'all': _fit_model(
+            feature_matrix[:, feature_indices['all']], labels, consensus_params
+        ),
     }
-
     for modality in ENSEMBLE_MODALITIES:
-        models[modality] = _fit_model(feature_matrix[:, feature_indices[modality]], labels)
-
+        models[modality] = _fit_model(
+            feature_matrix[:, feature_indices[modality]], labels, consensus_params
+        )
     return models
 
 
@@ -149,11 +302,10 @@ def _has_modality_signal(feature_vector, modality_presence_indices):
 
 
 def predict_ensemble_probabilities(model_bundle, feature_matrix):
-    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
-    if raw_feature_matrix.ndim == 1:
-        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
-    raw_feature_matrix = raw_feature_matrix.copy()
-    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=model_bundle.get('preprocessor'),
+    )
 
     models = model_bundle['models']
     feature_indices = {
@@ -164,12 +316,7 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         name: np.asarray(indices, dtype=np.int32)
         for name, indices in model_bundle['modality_presence_indices'].items()
     }
-    preprocessor = model_bundle.get('preprocessor')
-    if preprocessor is not None:
-        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
-    else:
-        processed_feature_matrix = raw_feature_matrix
-
+    
     probabilities = np.zeros(raw_feature_matrix.shape[0], dtype=np.float32)
     for row_index, raw_feature_vector in enumerate(raw_feature_matrix):
         processed_feature_vector = processed_feature_matrix[row_index]
@@ -195,35 +342,63 @@ def predict_ensemble_labels(model_bundle, feature_matrix):
     labels = (probabilities >= threshold).astype(np.int32)
     return labels, probabilities
 
+def _calibrate_threshold_cv(
+    features,
+    labels,
+    feature_indices,
+    modality_presence_indices,
+    categorical_indices=None,
+    n_splits=5,
+):
 
-def _calibrate_threshold(feature_matrix, labels, feature_indices, modality_presence_indices):
     classes, class_counts = np.unique(labels, return_counts=True)
-    if len(classes) != 2 or np.min(class_counts) < 2 or len(labels) < 10:
-        return DEFAULT_ENSEMBLE_THRESHOLD
+    if len(classes) != 2 or np.min(class_counts) < n_splits:
+        return DEFAULT_ENSEMBLE_THRESHOLD, None
+ 
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    oof_probabilities = np.zeros(len(labels), dtype=np.float32)
+    best_params_per_fold = []
+ 
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(features, labels)):
+        print(f"  Outer fold {fold_idx + 1}/{n_splits} — hyperparameter search + OOF prediction")
+ 
+        X_train, X_val = features[train_idx], features[val_idx]
+        y_train, y_val = labels[train_idx], labels[val_idx]
+ 
+        # Fit preprocessor ONLY on fold's training data (no leakage into val)
+        fold_preprocessor = _build_preprocessor(len(y_train), categorical_indices)
+        X_train_proc = np.asarray(fold_preprocessor.fit_transform(X_train), dtype=np.float32)
+        X_val_proc   = np.asarray(fold_preprocessor.transform(X_val),       dtype=np.float32)
+ 
+        # Inner CV hyperparameter search on this fold's training data
+        fold_best_params = _search_hyperparams(X_train_proc[:, feature_indices['all']], y_train)
+        best_params_per_fold.append(fold_best_params)
+        print(f"    Best params fold {fold_idx + 1}: {fold_best_params}")
+ 
+        # Fit fold ensemble with the fold's best params
+        fold_models = _fit_ensemble(X_train_proc, y_train, feature_indices, consensus_params=fold_best_params)
+        fold_bundle = {
+            'models': fold_models,
+            'feature_indices': feature_indices,
+            'modality_presence_indices': modality_presence_indices,
+            'preprocessor': fold_preprocessor,
+            'threshold': DEFAULT_ENSEMBLE_THRESHOLD,
+        }
+ 
+        # Collect out-of-fold probabilities (never seen by this fold's model during training)
+        oof_probabilities[val_idx] = predict_ensemble_probabilities(fold_bundle, X_val)
+ 
+    # Aggregate best params across all outer folds by majority vote
+    consensus = _consensus_params(best_params_per_fold)
+    print(f"  Consensus hyperparameters across {n_splits} folds: {consensus}")
+ 
+    # Threshold calibrated on clean OOF probabilities
+    threshold = best_threshold(oof_probabilities, labels)
+        
+    print(f"  OOF threshold: {threshold:.2f}")
+ 
+    return threshold, consensus
 
-    try:
-        train_features, validation_features, train_labels, validation_labels = train_test_split(
-            feature_matrix,
-            labels,
-            test_size=0.2,
-            random_state=42,
-            stratify=labels,
-        )
-    except ValueError:
-        return DEFAULT_ENSEMBLE_THRESHOLD
-
-    preprocessor = _build_preprocessor(len(train_labels))
-    processed_train_features = np.asarray(preprocessor.fit_transform(train_features), dtype=np.float32)
-
-    calibration_bundle = {
-        'models': _fit_ensemble(processed_train_features, train_labels, feature_indices),
-        'feature_indices': feature_indices,
-        'modality_presence_indices': modality_presence_indices,
-        'threshold': DEFAULT_ENSEMBLE_THRESHOLD,
-        'preprocessor': preprocessor,
-    }
-    validation_probabilities = predict_ensemble_probabilities(calibration_bundle, validation_features)
-    return best_threshold(validation_probabilities, validation_labels)
 
 
 def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None):
@@ -272,21 +447,44 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     if features.size == 0 or features.ndim != 2 or features.shape[0] == 0:
         raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
 
+    feature_names = list(get_feature_names())
     feature_indices = get_feature_group_indices(include_demographics=True)
     modality_presence_indices = get_feature_group_indices(include_demographics=False)
-    preprocessor = _build_preprocessor(len(labels))
+
+    categorical_indices = [
+        i for i, name in enumerate(feature_names)
+        if name.lower() in ('sex', 'gender')
+    ]
+    print(f"  Categorical feature indices: {categorical_indices} "
+          f"({[feature_names[i] for i in categorical_indices]})")
+ 
+    # --- Step 1: Nested CV for threshold calibration and consensus hyperparameters ---
+    print("Running nested CV for threshold calibration and hyperparameter consensus...")
+    threshold, consensus = _calibrate_threshold_cv(
+        features,
+        labels,
+        feature_indices,
+        modality_presence_indices,
+        categorical_indices=categorical_indices if categorical_indices else None,
+    )
+ 
+    # --- Step 2: Fit final models on ALL data using consensus hyperparameters ---
+    print("Fitting final ensemble on all training data with consensus hyperparameters...")
+    preprocessor = _build_preprocessor(len(labels), categorical_indices if categorical_indices else None)
     processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
-    # threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
-    threshold = 0.5
-    models = _fit_ensemble(processed_features, labels, feature_indices)
+    models = _fit_ensemble(processed_features, labels, feature_indices, consensus_params=consensus)
 
     export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
-    raw_feature_export_path = os.path.join(export_root, 'training_features_raw.csv')
-    preprocessed_feature_export_path = os.path.join(export_root, 'training_features_preprocessed.csv')
-    feature_names = list(get_feature_names())
-    _export_feature_matrix_csv(raw_feature_export_path, metadata_rows, labels, features, feature_names)
-    _export_feature_matrix_csv(preprocessed_feature_export_path, metadata_rows, labels, processed_features, feature_names)
-
+    feature_exports = export_feature_views(
+    export_root,
+    'training',
+    metadata_rows,
+    features,
+    feature_names,
+    preprocessor=preprocessor,
+    labels=labels,
+    )
+      
     return {
         'type': 'multimodal_xgb_ensemble',
         'threshold': threshold,
@@ -302,8 +500,5 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         },
         'models': models,
         'preprocessor': preprocessor,
-        'feature_exports': {
-            'raw': raw_feature_export_path,
-            'preprocessed': preprocessed_feature_export_path,
-        },
+        'feature_exports': feature_exports,
     }
