@@ -50,6 +50,14 @@ FEATURE_NAMES = (
     *FEATURE_NAME_GROUPS['ecg'],
 )
 
+SEGMENT_AGGREGATION_FUNCTIONS = {
+    'Max': lambda values: float(np.max(values)),
+    'Min': lambda values: float(np.min(values)),
+    'Mean': lambda values: float(np.mean(values)),
+    'Median': lambda values: float(np.median(values)),
+    'Std': lambda values: float(np.std(values)),
+}
+
 
 def _get_feature_cache_root(data_folder):
     return os.path.join(SCRIPT_DIR, FEATURE_CACHE_FOLDER_NAME)
@@ -297,13 +305,10 @@ def _aggregate_segment_feature_vectors(feature_vectors, segment_feature_names):
             aggregated_values.extend([np.nan] * len(SEGMENT_AGGREGATION_NAMES))
             continue
 
-        aggregated_values.extend([
-            float(np.max(finite_values)),
-            float(np.min(finite_values)),
-            float(np.mean(finite_values)),
-            float(np.median(finite_values)),
-            float(np.std(finite_values)),
-        ])
+        aggregated_values.extend(
+            SEGMENT_AGGREGATION_FUNCTIONS[aggregation_name](finite_values)
+            for aggregation_name in SEGMENT_AGGREGATION_NAMES
+        )
 
     return np.asarray(aggregated_values, dtype=np.float32)
 
