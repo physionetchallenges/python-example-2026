@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pandas as pd
 from sklearn.impute import KNNImputer
-from sklearn.metrics import f1_score
+from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -150,10 +150,82 @@ def best_threshold(probabilities, labels):
         if score > best_score:
             best_score = score
             best_value = float(threshold)
-        if best_value < 0.5:
-            best_value = 0.5
 
     return best_value
+
+
+def _safe_auroc(labels, probabilities):
+    if len(np.unique(labels)) < 2:
+        return np.nan
+    return float(roc_auc_score(labels, probabilities))
+
+
+def _safe_auprc(labels, probabilities):
+    if len(np.unique(labels)) < 2:
+        return np.nan
+    return float(average_precision_score(labels, probabilities, pos_label=1))
+
+
+def _compute_evaluation_metrics(labels, probabilities, threshold):
+    labels = np.asarray(labels, dtype=np.int32)
+    probabilities = np.asarray(probabilities, dtype=np.float32)
+    predictions = (probabilities >= threshold).astype(np.int32)
+
+    return {
+        'threshold': float(threshold),
+        'auroc': _safe_auroc(labels, probabilities),
+        'auprc': _safe_auprc(labels, probabilities),
+        'accuracy': float(accuracy_score(labels, predictions)),
+        'f1': float(f1_score(labels, predictions, zero_division=0)),
+        'precision': float(precision_score(labels, predictions, zero_division=0)),
+        'recall': float(recall_score(labels, predictions, zero_division=0)),
+    }
+
+
+def _summarize_metrics(metric_rows):
+    summary = {}
+    metric_names = ('auroc', 'auprc', 'accuracy', 'f1', 'precision', 'recall')
+
+    for metric_name in metric_names:
+        metric_values = np.asarray([row[metric_name] for row in metric_rows], dtype=np.float32)
+        finite_values = metric_values[np.isfinite(metric_values)]
+        if finite_values.size == 0:
+            summary[metric_name] = {'mean': None, 'std': None}
+            continue
+
+        summary[metric_name] = {
+            'mean': float(np.mean(finite_values)),
+            'std': float(np.std(finite_values)),
+        }
+
+    return summary
+
+
+def _format_metric_value(value):
+    return 'nan' if value is None or not np.isfinite(value) else f'{value:.3f}'
+
+
+def _print_metrics(prefix, metrics):
+    print(
+        f"{prefix} AUROC={_format_metric_value(metrics['auroc'])}, "
+        f"AUPRC={_format_metric_value(metrics['auprc'])}, "
+        f"Accuracy={_format_metric_value(metrics['accuracy'])}, "
+        f"F1={_format_metric_value(metrics['f1'])}, "
+        f"Precision={_format_metric_value(metrics['precision'])}, "
+        f"Recall={_format_metric_value(metrics['recall'])}, "
+        f"Threshold={metrics['threshold']:.2f}"
+    )
+
+
+def _print_metric_summary(prefix, summary):
+    metric_names = ('auroc', 'auprc', 'accuracy', 'f1', 'precision', 'recall')
+    parts = []
+    for metric_name in metric_names:
+        metric_summary = summary.get(metric_name, {})
+        mean_value = _format_metric_value(metric_summary.get('mean'))
+        std_value = _format_metric_value(metric_summary.get('std'))
+        parts.append(f"{metric_name.upper()}={mean_value} +/- {std_value}")
+    print(f"{prefix} {', '.join(parts)}")
 
 
 def _build_xgb_model(labels, extra_params=None):
@@ -353,11 +425,16 @@ def _calibrate_threshold_cv(
 
     classes, class_counts = np.unique(labels, return_counts=True)
     if len(classes) != 2 or np.min(class_counts) < n_splits:
-        return DEFAULT_ENSEMBLE_THRESHOLD, None
+        return DEFAULT_ENSEMBLE_THRESHOLD, None, {
+            'skipped': True,
+            'reason': 'Not enough samples per class to run stratified cross-validation.',
+            'n_splits': int(n_splits),
+        }
  
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
     oof_probabilities = np.zeros(len(labels), dtype=np.float32)
     best_params_per_fold = []
+    fold_metrics = []
  
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(features, labels)):
         print(f"  Outer fold {fold_idx + 1}/{n_splits} — hyperparameter search + OOF prediction")
@@ -386,19 +463,54 @@ def _calibrate_threshold_cv(
         }
  
         # Collect out-of-fold probabilities (never seen by this fold's model during training)
-        oof_probabilities[val_idx] = predict_ensemble_probabilities(fold_bundle, X_val)
+        fold_probabilities = predict_ensemble_probabilities(fold_bundle, X_val)
+        oof_probabilities[val_idx] = fold_probabilities
+
+        fold_metric_row = _compute_evaluation_metrics(
+            y_val,
+            fold_probabilities,
+            threshold=DEFAULT_ENSEMBLE_THRESHOLD,
+        )
+        fold_metric_row.update({
+            'fold': int(fold_idx + 1),
+            'train_size': int(len(train_idx)),
+            'validation_size': int(len(val_idx)),
+        })
+        fold_metrics.append(fold_metric_row)
+        _print_metrics(f"    Fold {fold_idx + 1} metrics:", fold_metric_row)
  
     # Aggregate best params across all outer folds by majority vote
     consensus = _consensus_params(best_params_per_fold)
     print(f"  Consensus hyperparameters across {n_splits} folds: {consensus}")
+
+    fold_metric_summary = _summarize_metrics(fold_metrics)
+    _print_metric_summary("  Mean fold metrics:", fold_metric_summary)
  
     # Threshold calibrated on clean OOF probabilities
-    threshold = best_threshold(oof_probabilities, labels)
-        
-    print(f"  OOF threshold: {threshold:.2f}")
- 
-    return threshold, consensus
+    oof_default_metrics = _compute_evaluation_metrics(
+        labels,
+        oof_probabilities,
+        threshold=DEFAULT_ENSEMBLE_THRESHOLD,
+    )
+    _print_metrics("  OOF metrics before calibration:", oof_default_metrics)
 
+    threshold = best_threshold(oof_probabilities, labels)
+
+    oof_calibrated_metrics = _compute_evaluation_metrics(
+        labels,
+        oof_probabilities,
+        threshold=threshold,
+    )
+    _print_metrics("  OOF metrics after calibration:", oof_calibrated_metrics)
+ 
+    return threshold, consensus, {
+        'skipped': False,
+        'n_splits': int(n_splits),
+        'fold_metrics': fold_metrics,
+        'fold_metric_summary': fold_metric_summary,
+        'oof_default_threshold_metrics': oof_default_metrics,
+        'oof_calibrated_metrics': oof_calibrated_metrics,
+    }
 
 
 def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None):
@@ -460,7 +572,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
  
     # --- Step 1: Nested CV for threshold calibration and consensus hyperparameters ---
     print("Running nested CV for threshold calibration and hyperparameter consensus...")
-    threshold, consensus = _calibrate_threshold_cv(
+    threshold, consensus, cv_metrics = _calibrate_threshold_cv(
         features,
         labels,
         feature_indices,
@@ -501,4 +613,5 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         'models': models,
         'preprocessor': preprocessor,
         'feature_exports': feature_exports,
+        'cv_metrics': cv_metrics,
     }
