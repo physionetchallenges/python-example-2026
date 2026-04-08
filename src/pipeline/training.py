@@ -3,9 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import KNNImputer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
@@ -22,11 +19,11 @@ from .config import (
 )
 from .cross_validation import CrossValidationConfig, EnsembleCrossValidator, normalize_site_group
 from .features import get_feature_group_indices, get_feature_names, get_or_create_record_feature_vector
+from .preprocessing import build_preprocessor, get_processed_feature_names, remap_feature_indices
 
 
 DEFAULT_ENSEMBLE_THRESHOLD = 0.5
 ENSEMBLE_MODALITIES = ('resp', 'eeg', 'ecg')
-DEFAULT_KNN_NEIGHBORS = 5
 
 # Hyperparameter search space
 PARAM_DIST = {
@@ -121,6 +118,29 @@ def get_feature_export_paths(export_root, prefix):
         'raw': os.path.join(export_root, f'{prefix}_features_raw.csv'),
         'preprocessed': os.path.join(export_root, f'{prefix}_features_preprocessed.csv'),
     }
+
+
+def _get_feature_group_name(feature_index, modality_presence_indices):
+    for group_name in ('resp', 'eeg', 'ecg'):
+        group_index_set = set(np.asarray(modality_presence_indices[group_name], dtype=np.int32).tolist())
+        if feature_index in group_index_set:
+            return group_name
+
+    return 'demographics'
+
+
+def export_selected_features_csv(output_path, feature_names, selected_raw_feature_indices, modality_presence_indices):
+    selected_rows = []
+    for processed_index, raw_index in enumerate(np.asarray(selected_raw_feature_indices, dtype=np.int32)):
+        selected_rows.append({
+            'processed_index': int(processed_index),
+            'raw_index': int(raw_index),
+            'feature_name': feature_names[int(raw_index)],
+            'group': _get_feature_group_name(int(raw_index), modality_presence_indices),
+        })
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    pd.DataFrame(selected_rows).to_csv(output_path, index=False)
     
 def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, feature_names, preprocessor=None, labels=None):
     raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
@@ -139,7 +159,7 @@ def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, fea
         export_paths['preprocessed'],
         metadata_rows,
         processed_feature_matrix,
-        feature_names,
+        get_processed_feature_names(feature_names, preprocessor=preprocessor),
         labels=labels,
     )
     return export_paths    
@@ -186,74 +206,17 @@ def _build_search_model(labels):
         tree_method='hist',
     )
 
-
-
-def _build_preprocessor(num_samples, categorical_indices=None):
-
-    neighbors = min(DEFAULT_KNN_NEIGHBORS, max(1, num_samples - 1)) if num_samples > 1 else 1
- 
-    if categorical_indices is None or len(categorical_indices) == 0:
-        # Original pipeline — no categorical columns
-        return Pipeline([
-            ('imputer', KNNImputer(n_neighbors=neighbors, keep_empty_features=True)),
-            ('scaler', StandardScaler()),
-        ])
-
-    return _CategoricalAwarePreprocessor(
-        n_neighbors=neighbors,
-        categorical_indices=np.asarray(categorical_indices, dtype=np.int32),
-    )
-
-class _CategoricalAwarePreprocessor:
- 
-    def __init__(self, n_neighbors, categorical_indices):
-        self.n_neighbors = n_neighbors
-        self.categorical_indices = categorical_indices
-        self.imputer = KNNImputer(n_neighbors=n_neighbors, keep_empty_features=True)
-        self.scaler = StandardScaler()
-        self._numerical_indices = None  # set during fit
- 
-    def _get_numerical_indices(self, n_features):
-        all_idx = np.arange(n_features)
-        return np.setdiff1d(all_idx, self.categorical_indices)
- 
-    def fit_transform(self, X):
-        X = np.asarray(X, dtype=np.float32).copy()
-        X[~np.isfinite(X)] = np.nan
-
-        # Step 1: impute everything
-        X_imputed = np.asarray(self.imputer.fit_transform(X), dtype=np.float32)
- 
-        # Step 2: fit scaler on numerical columns only
-        self._numerical_indices = self._get_numerical_indices(X.shape[1])
-        X_num = X_imputed[:, self._numerical_indices]
-        X_num_scaled = np.asarray(self.scaler.fit_transform(X_num), dtype=np.float32)
- 
-        # Step 3: assemble output — categorical columns keep imputed values
-        X_out = X_imputed.copy()
-        X_out[:, self._numerical_indices] = X_num_scaled
-        return X_out
- 
-    def transform(self, X):
-        X = np.asarray(X, dtype=np.float32).copy()
-        X[~np.isfinite(X)] = np.nan
- 
-        X_imputed = np.asarray(self.imputer.transform(X), dtype=np.float32)
- 
-        X_num = X_imputed[:, self._numerical_indices]
-        X_num_scaled = np.asarray(self.scaler.transform(X_num), dtype=np.float32)
- 
-        X_out = X_imputed.copy()
-        X_out[:, self._numerical_indices] = X_num_scaled
-        return X_out
-
 def _fit_ensemble(feature_matrix, labels, feature_indices, consensus_params=None):
-    models = {
-        'all': _fit_model(
-            feature_matrix[:, feature_indices['all']], labels, consensus_params
-        ),
-    }
+    models = {}
+    if feature_indices['all'].size == 0:
+        raise ValueError('Correlation selector removed all features for the global model.')
+
+    models['all'] = _fit_model(
+        feature_matrix[:, feature_indices['all']], labels, consensus_params
+    )
     for modality in ENSEMBLE_MODALITIES:
+        if feature_indices[modality].size == 0:
+            continue
         models[modality] = _fit_model(
             feature_matrix[:, feature_indices[modality]], labels, consensus_params
         )
@@ -286,6 +249,8 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         processed_feature_vector = processed_feature_matrix[row_index]
         modality_probabilities = []
         for modality in ENSEMBLE_MODALITIES:
+            if modality not in models or feature_indices[modality].size == 0:
+                continue
             if _has_modality_signal(raw_feature_vector, modality_presence_indices[modality]):
                 modality_vector = processed_feature_vector[feature_indices[modality]].reshape(1, -1)
                 modality_probability = models[modality].predict_proba(modality_vector)[0][1]
@@ -377,7 +342,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         config=cv_config,
         param_dist=PARAM_DIST,
         default_threshold=DEFAULT_ENSEMBLE_THRESHOLD,
-        build_preprocessor=_build_preprocessor,
+        build_preprocessor=build_preprocessor,
         build_search_model=_build_search_model,
         fit_ensemble=_fit_ensemble,
         predict_probabilities=predict_ensemble_probabilities,
@@ -387,6 +352,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     print(f"  Hospital CV groups: {sorted(np.unique(site_groups).tolist())}")
     print(f"  CV strategy: {'grouped by hospital' if cv_config.use_site_grouped_cv else 'random stratified folds'}")
     print(f"  Hyperparameter search: {'enabled' if cv_config.optimize_hyperparameter_search else 'disabled'}")
+    print('  Feature selection is fitted inside each CV fold and then re-fitted on all training data for the final model.')
  
     # --- Step 1: Nested CV for threshold calibration and consensus hyperparameters ---
     print("Running nested CV for threshold calibration and hyperparameter consensus...")
@@ -404,9 +370,15 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
  
     # --- Step 2: Fit final models on ALL data using consensus hyperparameters ---
     print("Fitting final ensemble on all training data with consensus hyperparameters...")
-    preprocessor = _build_preprocessor(len(labels), categorical_indices if categorical_indices else None)
+    preprocessor = build_preprocessor(len(labels), categorical_indices if categorical_indices else None)
     processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
-    models = _fit_ensemble(processed_features, labels, feature_indices, consensus_params=consensus)
+    selected_feature_indices = remap_feature_indices(preprocessor, feature_indices)
+    processed_feature_names = get_processed_feature_names(feature_names, preprocessor=preprocessor)
+    selected_raw_feature_indices = np.asarray(preprocessor.selector.selected_indices_, dtype=np.int32)
+    print(
+        f"Correlation selector: kept {len(processed_feature_names)}/{len(feature_names)} features"
+    )
+    models = _fit_ensemble(processed_features, labels, selected_feature_indices, consensus_params=consensus)
 
     export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
     feature_exports = export_feature_views(
@@ -418,14 +390,24 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     preprocessor=preprocessor,
     labels=labels,
     )
+    selected_features_csv = os.path.join(export_root, 'training_features_selected.csv')
+    export_selected_features_csv(
+        selected_features_csv,
+        feature_names,
+        selected_raw_feature_indices,
+        modality_presence_indices,
+    )
+    feature_exports['selected'] = selected_features_csv
       
     return {
         'type': 'multimodal_xgb_ensemble',
         'threshold': threshold,
         'feature_names': feature_names,
+        'processed_feature_names': processed_feature_names,
+        'selected_raw_feature_indices': selected_raw_feature_indices.tolist(),
         'feature_indices': {
             name: indices.tolist()
-            for name, indices in feature_indices.items()
+            for name, indices in selected_feature_indices.items()
             if name in {'all', 'resp', 'eeg', 'ecg'}
         },
         'modality_presence_indices': {

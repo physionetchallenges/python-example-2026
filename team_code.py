@@ -129,6 +129,8 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     if verbose and feature_exports:
         print(f"Raw features CSV: {feature_exports.get('raw')}")
         print(f"Preprocessed features CSV: {feature_exports.get('preprocessed')}")
+        if feature_exports.get('selected'):
+            print(f"Selected features CSV: {feature_exports.get('selected')}")
 
     if verbose:
         print('Done.')

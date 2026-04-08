@@ -259,8 +259,12 @@ class EnsembleCrossValidator:
 
             fold_preprocessor = self.build_preprocessor(len(y_train), categorical_indices)
             X_train_proc = np.asarray(fold_preprocessor.fit_transform(X_train), dtype=np.float32)
+            remapped_feature_indices = fold_preprocessor.transform_feature_indices(feature_indices)
+            print(
+                f"    Correlation selector kept {X_train_proc.shape[1]}/{X_train.shape[1]} features"
+            )
             fold_best_params = self._search_hyperparams(
-                X_train_proc[:, feature_indices['all']],
+                X_train_proc[:, remapped_feature_indices['all']],
                 y_train,
                 site_groups=search_site_groups,
             )
@@ -298,15 +302,19 @@ class EnsembleCrossValidator:
 
             fold_preprocessor = self.build_preprocessor(len(y_train), categorical_indices)
             X_train_proc = np.asarray(fold_preprocessor.fit_transform(X_train), dtype=np.float32)
+            remapped_feature_indices = fold_preprocessor.transform_feature_indices(feature_indices)
+            print(
+                f"    Correlation selector kept {X_train_proc.shape[1]}/{X_train.shape[1]} features"
+            )
             fold_models = self.fit_ensemble(
                 X_train_proc,
                 y_train,
-                feature_indices,
+                remapped_feature_indices,
                 consensus_params=consensus_params,
             )
             fold_bundle = {
                 'models': fold_models,
-                'feature_indices': feature_indices,
+                'feature_indices': remapped_feature_indices,
                 'modality_presence_indices': modality_presence_indices,
                 'preprocessor': fold_preprocessor,
                 'threshold': self.default_threshold,

@@ -8,6 +8,7 @@ from src.resp_processing import RESP_FEATURE_LENGTH
 SCRIPT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
 FEATURE_CACHE_FOLDER_NAME = '.feature_cache'
+FEATURE_CORRELATION_THRESHOLD = 0.95
 MAX_TRAIN_WORKERS = max(1, min(4, os.cpu_count() or 1))
 USE_SITE_GROUPED_CV = True
 OPTIMIZE_HYPERPARAMETER_SEARCH = False
