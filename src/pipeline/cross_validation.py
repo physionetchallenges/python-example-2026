@@ -388,7 +388,7 @@ class EnsembleCrossValidator:
             estimator=self.build_search_model(y_train),
             param_distributions=self.param_dist,
             n_iter=self.config.search_iterations,
-            scoring='f1',
+            scoring='roc_auc',
             cv=inner_cv,
             random_state=self.config.random_state,
             n_jobs=-1,
