@@ -436,6 +436,8 @@ class EnsembleCrossValidator:
             if score > best_score:
                 best_score = score
                 best_value = float(threshold)
+            if best_value < 0.5:
+                best_value = 0.5
 
         return best_value
 
