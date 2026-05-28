@@ -9,12 +9,12 @@ from .resp_peakedness import peakednessCost
 def peakedness_application(data, stage, subject_id=1):
     fs = 25
     setup = {
-        "K": 5,
-        "DT": 5,
+        "K": 15,
+        "DT": 15,
         "Ts": 60,
-        "Tm": 20,
+        "Tm": 30,
         "Omega_r": np.array([5, 25]) / 60,
-        "Nfft": np.power(2, 13),
+        "Nfft": np.power(2, 12),
     }
     time_axis = np.arange(0, data.shape[0] / fs, 1 / fs)
 

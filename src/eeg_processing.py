@@ -134,7 +134,7 @@ def _extract_channel_metrics(signal, fs):
     if epochs.size == 0:
         return None
 
-    band_powers, complexities = eeg_features.extract_band_powers(epochs, fs, win_len=15)
+    band_powers, complexities = eeg_features.extract_band_powers(epochs, fs, win_len=30)
     if len(band_powers) > 60:
         band_powers = band_powers.iloc[60:]
         complexities = complexities.iloc[60:]

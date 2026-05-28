@@ -3,23 +3,37 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import KNNImputer
-from sklearn.metrics import f1_score
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
 from helper_code import DEMOGRAPHICS_FILE, HEADERS, find_patients, load_label
 
-from .config import MAX_TRAIN_WORKERS
+from .config import (
+    CV_RANDOM_STATE,
+    CV_SEARCH_ITERATIONS,
+    DEFAULT_CV_HYPERPARAMETERS,
+    MAX_TRAIN_WORKERS,
+    OPTIMIZE_HYPERPARAMETER_SEARCH,
+    RANDOM_CV_N_SPLITS,
+    USE_SITE_GROUPED_CV,
+)
+from .cross_validation import CrossValidationConfig, EnsembleCrossValidator, normalize_site_group
 from .features import get_feature_group_indices, get_feature_names, get_or_create_record_feature_vector
+from .preprocessing import build_preprocessor, get_processed_feature_names, remap_feature_indices
 
 
 DEFAULT_ENSEMBLE_THRESHOLD = 0.5
 ENSEMBLE_MODALITIES = ('resp', 'eeg', 'ecg')
-DEFAULT_KNN_NEIGHBORS = 5
+
+# Hyperparameter search space
+PARAM_DIST = {
+    'max_depth':        [3, 4, 5], 
+    'min_child_weight': [1, 2, 3], 
+    'subsample':        [0.7, 0.8, 0.9], 
+    'colsample_bytree': [0.6, 0.7, 0.8], 
+    'reg_lambda':       [0.5, 1.0, 2.0], 
+    'reg_alpha':        [0.0, 0.05, 0.1], 
+}
 
 
 def build_training_metadata_cache(patient_data_file):
@@ -76,70 +90,136 @@ def process_training_record(record, data_folder, demographics_cache, diagnosis_c
             'session_id': session_id,
         }, None, None, f"Error processing {patient_id}: {exc}"
 
+def prepare_feature_matrix(feature_matrix, preprocessor=None):
+    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
+    if raw_feature_matrix.ndim == 1:
+        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
+    raw_feature_matrix = raw_feature_matrix.copy()
+    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
 
-def _export_feature_matrix_csv(output_path, metadata_rows, labels, feature_matrix, feature_names):
+    if preprocessor is not None:
+        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
+    else:
+        processed_feature_matrix = raw_feature_matrix
+
+    return raw_feature_matrix, processed_feature_matrix
+
+def export_feature_matrix_csv(output_path, metadata_rows, feature_matrix, feature_names, labels=None):
     dataframe = pd.DataFrame(metadata_rows)
-    dataframe['label'] = labels
+    if labels is not None:
+        dataframe['label'] = labels
     feature_frame = pd.DataFrame(feature_matrix, columns=feature_names)
     dataframe = pd.concat([dataframe.reset_index(drop=True), feature_frame.reset_index(drop=True)], axis=1)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     dataframe.to_csv(output_path, index=False)
 
-
-def best_threshold(probabilities, labels):
-    thresholds = np.linspace(0, 1, 101)
-    best_score = -1.0
-    best_value = DEFAULT_ENSEMBLE_THRESHOLD
-
-    for threshold in thresholds:
-        predictions = (probabilities >= threshold).astype(np.int32)
-        score = f1_score(labels, predictions, zero_division=0)
-        if score > best_score:
-            best_score = score
-            best_value = float(threshold)
-
-    return best_value
+def get_feature_export_paths(export_root, prefix):
+    return {
+        'raw': os.path.join(export_root, f'{prefix}_features_raw.csv'),
+        'preprocessed': os.path.join(export_root, f'{prefix}_features_preprocessed.csv'),
+    }
 
 
-def _build_xgb_model(labels):
+def _get_feature_group_name(feature_index, modality_presence_indices):
+    for group_name in ('resp', 'eeg', 'ecg'):
+        group_index_set = set(np.asarray(modality_presence_indices[group_name], dtype=np.int32).tolist())
+        if feature_index in group_index_set:
+            return group_name
+
+    return 'demographics'
+
+
+def export_selected_features_csv(output_path, feature_names, selected_raw_feature_indices, modality_presence_indices):
+    selected_rows = []
+    for processed_index, raw_index in enumerate(np.asarray(selected_raw_feature_indices, dtype=np.int32)):
+        selected_rows.append({
+            'processed_index': int(processed_index),
+            'raw_index': int(raw_index),
+            'feature_name': feature_names[int(raw_index)],
+            'group': _get_feature_group_name(int(raw_index), modality_presence_indices),
+        })
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    pd.DataFrame(selected_rows).to_csv(output_path, index=False)
+    
+def export_feature_views(export_root, prefix, metadata_rows, feature_matrix, feature_names, preprocessor=None, labels=None):
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=preprocessor,
+    )
+    export_paths = get_feature_export_paths(export_root, prefix)
+    export_feature_matrix_csv(
+        export_paths['raw'],
+        metadata_rows,
+        raw_feature_matrix,
+        feature_names,
+        labels=labels,
+    )
+    export_feature_matrix_csv(
+        export_paths['preprocessed'],
+        metadata_rows,
+        processed_feature_matrix,
+        get_processed_feature_names(feature_names, preprocessor=preprocessor),
+        labels=labels,
+    )
+    return export_paths    
+
+
+def _build_xgb_model(labels, extra_params=None):
+   
     neg = int(np.sum(labels == 0))
     pos = int(np.sum(labels == 1))
     scale_pos_weight = (neg / pos) if pos > 0 else 1.0
-
-    return XGBClassifier(
+ 
+    base_params = dict(
         scale_pos_weight=scale_pos_weight,
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
+        n_estimators=500,
+        learning_rate=0.05, 
+        max_depth=4, 
         subsample=0.8,
+        colsample_bytree=0.7,
+        min_child_weight=2, 
+        reg_alpha=0.0,
+        reg_lambda=1.0,
         random_state=42,
         eval_metric='auc',
         tree_method='hist',
     )
+    if extra_params:
+        base_params.update(extra_params)
+ 
+    return XGBClassifier(**base_params)
 
-
-def _fit_model(feature_matrix, labels):
-    model = _build_xgb_model(labels)
+def _fit_model(feature_matrix, labels, consensus_params=None):
+    model = _build_xgb_model(labels, extra_params=consensus_params)
     model.fit(feature_matrix, labels)
     return model
 
 
-def _build_preprocessor(num_samples):
-    neighbors = min(DEFAULT_KNN_NEIGHBORS, max(1, num_samples - 1)) if num_samples > 1 else 1
-    return Pipeline([
-        ('imputer', KNNImputer(n_neighbors=neighbors, keep_empty_features=True)),
-        ('scaler', StandardScaler()),
-    ])
+def _build_search_model(labels):
+    return XGBClassifier(
+        scale_pos_weight=(int(np.sum(labels == 0)) / max(int(np.sum(labels == 1)), 1)),
+        n_estimators=500,
+        learning_rate=0.05,
+        random_state=CV_RANDOM_STATE,
+        eval_metric='auc',
+        tree_method='hist',
+    )
 
+def _fit_ensemble(feature_matrix, labels, feature_indices, consensus_params=None):
+    models = {}
+    if feature_indices['all'].size == 0:
+        raise ValueError('Correlation selector removed all features for the global model.')
 
-def _fit_ensemble(feature_matrix, labels, feature_indices):
-    models = {
-        'all': _fit_model(feature_matrix[:, feature_indices['all']], labels),
-    }
-
+    models['all'] = _fit_model(
+        feature_matrix[:, feature_indices['all']], labels, consensus_params
+    )
     for modality in ENSEMBLE_MODALITIES:
-        models[modality] = _fit_model(feature_matrix[:, feature_indices[modality]], labels)
-
+        if feature_indices[modality].size == 0:
+            continue
+        models[modality] = _fit_model(
+            feature_matrix[:, feature_indices[modality]], labels, consensus_params
+        )
     return models
 
 
@@ -149,11 +229,10 @@ def _has_modality_signal(feature_vector, modality_presence_indices):
 
 
 def predict_ensemble_probabilities(model_bundle, feature_matrix):
-    raw_feature_matrix = np.asarray(feature_matrix, dtype=np.float32)
-    if raw_feature_matrix.ndim == 1:
-        raw_feature_matrix = raw_feature_matrix.reshape(1, -1)
-    raw_feature_matrix = raw_feature_matrix.copy()
-    raw_feature_matrix[~np.isfinite(raw_feature_matrix)] = np.nan
+    raw_feature_matrix, processed_feature_matrix = prepare_feature_matrix(
+        feature_matrix,
+        preprocessor=model_bundle.get('preprocessor'),
+    )
 
     models = model_bundle['models']
     feature_indices = {
@@ -164,17 +243,14 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         name: np.asarray(indices, dtype=np.int32)
         for name, indices in model_bundle['modality_presence_indices'].items()
     }
-    preprocessor = model_bundle.get('preprocessor')
-    if preprocessor is not None:
-        processed_feature_matrix = np.asarray(preprocessor.transform(raw_feature_matrix), dtype=np.float32)
-    else:
-        processed_feature_matrix = raw_feature_matrix
-
+    
     probabilities = np.zeros(raw_feature_matrix.shape[0], dtype=np.float32)
     for row_index, raw_feature_vector in enumerate(raw_feature_matrix):
         processed_feature_vector = processed_feature_matrix[row_index]
         modality_probabilities = []
         for modality in ENSEMBLE_MODALITIES:
+            if modality not in models or feature_indices[modality].size == 0:
+                continue
             if _has_modality_signal(raw_feature_vector, modality_presence_indices[modality]):
                 modality_vector = processed_feature_vector[feature_indices[modality]].reshape(1, -1)
                 modality_probability = models[modality].predict_proba(modality_vector)[0][1]
@@ -194,36 +270,6 @@ def predict_ensemble_labels(model_bundle, feature_matrix):
     probabilities = predict_ensemble_probabilities(model_bundle, feature_matrix)
     labels = (probabilities >= threshold).astype(np.int32)
     return labels, probabilities
-
-
-def _calibrate_threshold(feature_matrix, labels, feature_indices, modality_presence_indices):
-    classes, class_counts = np.unique(labels, return_counts=True)
-    if len(classes) != 2 or np.min(class_counts) < 2 or len(labels) < 10:
-        return DEFAULT_ENSEMBLE_THRESHOLD
-
-    try:
-        train_features, validation_features, train_labels, validation_labels = train_test_split(
-            feature_matrix,
-            labels,
-            test_size=0.2,
-            random_state=42,
-            stratify=labels,
-        )
-    except ValueError:
-        return DEFAULT_ENSEMBLE_THRESHOLD
-
-    preprocessor = _build_preprocessor(len(train_labels))
-    processed_train_features = np.asarray(preprocessor.fit_transform(train_features), dtype=np.float32)
-
-    calibration_bundle = {
-        'models': _fit_ensemble(processed_train_features, train_labels, feature_indices),
-        'feature_indices': feature_indices,
-        'modality_presence_indices': modality_presence_indices,
-        'threshold': DEFAULT_ENSEMBLE_THRESHOLD,
-        'preprocessor': preprocessor,
-    }
-    validation_probabilities = predict_ensemble_probabilities(calibration_bundle, validation_features)
-    return best_threshold(validation_probabilities, validation_labels)
 
 
 def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None):
@@ -272,28 +318,96 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
     if features.size == 0 or features.ndim != 2 or features.shape[0] == 0:
         raise ValueError('No valid training samples were extracted. Review feature extraction logs for the skipped records.')
 
+    feature_names = list(get_feature_names())
     feature_indices = get_feature_group_indices(include_demographics=True)
     modality_presence_indices = get_feature_group_indices(include_demographics=False)
-    preprocessor = _build_preprocessor(len(labels))
+
+    categorical_indices = [
+        i for i, name in enumerate(feature_names)
+        if name.lower() in ('sex', 'gender')
+    ]
+    site_groups = np.asarray([
+        normalize_site_group(metadata_row['site_id'])
+        for metadata_row in metadata_rows
+    ])
+    cv_config = CrossValidationConfig(
+        use_site_grouped_cv=USE_SITE_GROUPED_CV,
+        optimize_hyperparameter_search=OPTIMIZE_HYPERPARAMETER_SEARCH,
+        outer_random_splits=RANDOM_CV_N_SPLITS,
+        random_state=CV_RANDOM_STATE,
+        search_iterations=CV_SEARCH_ITERATIONS,
+        fixed_hyperparameters=DEFAULT_CV_HYPERPARAMETERS,
+    )
+    cv_runner = EnsembleCrossValidator(
+        config=cv_config,
+        param_dist=PARAM_DIST,
+        default_threshold=DEFAULT_ENSEMBLE_THRESHOLD,
+        build_preprocessor=build_preprocessor,
+        build_search_model=_build_search_model,
+        fit_ensemble=_fit_ensemble,
+        predict_probabilities=predict_ensemble_probabilities,
+    )
+    print(f"  Categorical feature indices: {categorical_indices} "
+          f"({[feature_names[i] for i in categorical_indices]})")
+    print(f"  Hospital CV groups: {sorted(np.unique(site_groups).tolist())}")
+    print(f"  CV strategy: {'grouped by hospital' if cv_config.use_site_grouped_cv else 'random stratified folds'}")
+    print(f"  Hyperparameter search: {'enabled' if cv_config.optimize_hyperparameter_search else 'disabled'}")
+    print('  Feature selection is fitted inside each CV fold and then re-fitted on all training data for the final model.')
+ 
+    # --- Step 1: Nested CV for threshold calibration and consensus hyperparameters ---
+    print("Running nested CV for threshold calibration and hyperparameter consensus...")
+    cv_result = cv_runner.run(
+        features,
+        labels,
+        feature_indices,
+        modality_presence_indices,
+        categorical_indices=categorical_indices if categorical_indices else None,
+        site_groups=site_groups,
+    )
+    threshold = cv_result.threshold
+    consensus = cv_result.consensus_params
+    cv_metrics = cv_result.metrics
+ 
+    # --- Step 2: Fit final models on ALL data using consensus hyperparameters ---
+    print("Fitting final ensemble on all training data with consensus hyperparameters...")
+    preprocessor = build_preprocessor(len(labels), categorical_indices if categorical_indices else None)
     processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
-    # threshold = _calibrate_threshold(features, labels, feature_indices, modality_presence_indices)
-    threshold = 0.5
-    models = _fit_ensemble(processed_features, labels, feature_indices)
+    selected_feature_indices = remap_feature_indices(preprocessor, feature_indices)
+    processed_feature_names = get_processed_feature_names(feature_names, preprocessor=preprocessor)
+    selected_raw_feature_indices = np.asarray(preprocessor.selector.selected_indices_, dtype=np.int32)
+    print(
+        f"Correlation selector: kept {len(processed_feature_names)}/{len(feature_names)} features"
+    )
+    models = _fit_ensemble(processed_features, labels, selected_feature_indices, consensus_params=consensus)
 
     export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
-    raw_feature_export_path = os.path.join(export_root, 'training_features_raw.csv')
-    preprocessed_feature_export_path = os.path.join(export_root, 'training_features_preprocessed.csv')
-    feature_names = list(get_feature_names())
-    _export_feature_matrix_csv(raw_feature_export_path, metadata_rows, labels, features, feature_names)
-    _export_feature_matrix_csv(preprocessed_feature_export_path, metadata_rows, labels, processed_features, feature_names)
-
+    feature_exports = export_feature_views(
+    export_root,
+    'training',
+    metadata_rows,
+    features,
+    feature_names,
+    preprocessor=preprocessor,
+    labels=labels,
+    )
+    selected_features_csv = os.path.join(export_root, 'training_features_selected.csv')
+    export_selected_features_csv(
+        selected_features_csv,
+        feature_names,
+        selected_raw_feature_indices,
+        modality_presence_indices,
+    )
+    feature_exports['selected'] = selected_features_csv
+      
     return {
         'type': 'multimodal_xgb_ensemble',
         'threshold': threshold,
         'feature_names': feature_names,
+        'processed_feature_names': processed_feature_names,
+        'selected_raw_feature_indices': selected_raw_feature_indices.tolist(),
         'feature_indices': {
             name: indices.tolist()
-            for name, indices in feature_indices.items()
+            for name, indices in selected_feature_indices.items()
             if name in {'all', 'resp', 'eeg', 'ecg'}
         },
         'modality_presence_indices': {
@@ -302,8 +416,6 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         },
         'models': models,
         'preprocessor': preprocessor,
-        'feature_exports': {
-            'raw': raw_feature_export_path,
-            'preprocessed': preprocessed_feature_export_path,
-        },
+        'feature_exports': feature_exports,
+        'cv_metrics': cv_metrics,
     }
