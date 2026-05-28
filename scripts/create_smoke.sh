@@ -13,7 +13,7 @@ set -euo pipefail
 FULL_DATA_PATH="${FULL_DATA_PATH:-data/training_set}"  # Override with env var if needed
 
 SMOKE_PATH="data/training_smoke"
-N_RECORDS="${N_RECORDS:-5}"
+N_RECORDS="${N_RECORDS:-20}"
 
 echo "Creating smoke dataset..."
 echo "Source: ${FULL_DATA_PATH}"
