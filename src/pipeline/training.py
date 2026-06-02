@@ -19,7 +19,7 @@ from .config import (
 )
 from .cross_validation import CrossValidationConfig, EnsembleCrossValidator, normalize_site_group
 from .features import get_feature_group_indices, get_feature_names, get_or_create_record_feature_vector
-from .preprocessing import build_preprocessor, get_processed_feature_names, remap_feature_indices
+from .preprocessing import build_preprocessor, get_processed_feature_names, remap_feature_indices, PCA_VARIANCE_THRESHOLD
 
 
 DEFAULT_ENSEMBLE_THRESHOLD = 0.5
@@ -34,6 +34,11 @@ PARAM_DIST = {
     'reg_lambda':       [0.5, 1.0, 2.0], 
     'reg_alpha':        [0.0, 0.05, 0.1], 
 }
+
+
+def build_preprocessor_for_cv(num_samples, categorical_indices=None):
+    """Build preprocessor without PCA for cross-validation."""
+    return build_preprocessor(num_samples, categorical_indices, apply_pca=False)
 
 
 def build_training_metadata_cache(patient_data_file):
@@ -233,7 +238,12 @@ def predict_ensemble_probabilities(model_bundle, feature_matrix):
         feature_matrix,
         preprocessor=model_bundle.get('preprocessor'),
     )
-
+    
+    # Debug: Print feature dimensions
+    preprocessor = model_bundle.get('preprocessor')
+    if preprocessor and hasattr(preprocessor, 'pca') and preprocessor.pca is not None:
+        print(f"  [DEBUG] Using preprocessor with PCA: {raw_feature_matrix.shape[1]} → {processed_feature_matrix.shape[1]} features")
+    
     models = model_bundle['models']
     feature_indices = {
         name: np.asarray(indices, dtype=np.int32)
@@ -342,7 +352,7 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         config=cv_config,
         param_dist=PARAM_DIST,
         default_threshold=DEFAULT_ENSEMBLE_THRESHOLD,
-        build_preprocessor=build_preprocessor,
+        build_preprocessor=build_preprocessor_for_cv,
         build_search_model=_build_search_model,
         fit_ensemble=_fit_ensemble,
         predict_probabilities=predict_ensemble_probabilities,
@@ -370,14 +380,29 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
  
     # --- Step 2: Fit final models on ALL data using consensus hyperparameters ---
     print("Fitting final ensemble on all training data with consensus hyperparameters...")
-    preprocessor = build_preprocessor(len(labels), categorical_indices if categorical_indices else None)
+    preprocessor = build_preprocessor(len(labels), categorical_indices if categorical_indices else None, apply_pca=True)
     processed_features = np.asarray(preprocessor.fit_transform(features), dtype=np.float32)
-    selected_feature_indices = remap_feature_indices(preprocessor, feature_indices)
     processed_feature_names = get_processed_feature_names(feature_names, preprocessor=preprocessor)
     selected_raw_feature_indices = np.asarray(preprocessor.selector.selected_indices_, dtype=np.int32)
     print(
-        f"Correlation selector: kept {len(processed_feature_names)}/{len(feature_names)} features"
+        f"Correlation selector: kept {len(preprocessor.selector.selected_indices_)}/{len(feature_names)} features"
     )
+    if preprocessor.pca is not None:
+        print(
+            f"PCA: reduced {len(preprocessor.selector.selected_indices_)} features to {preprocessor.pca.n_components_used} components "
+            f"(explaining {PCA_VARIANCE_THRESHOLD*100:.1f}% of variance)"
+        )
+        # When PCA is applied, all components are used for all modalities since PCA creates new synthetic features
+        n_pca_components = preprocessor.pca.n_components_used
+        selected_feature_indices = {
+            'all': np.arange(n_pca_components, dtype=np.int32),
+            'resp': np.arange(n_pca_components, dtype=np.int32),
+            'eeg': np.arange(n_pca_components, dtype=np.int32),
+            'ecg': np.arange(n_pca_components, dtype=np.int32),
+        }
+    else:
+        selected_feature_indices = remap_feature_indices(preprocessor, feature_indices)
+    
     models = _fit_ensemble(processed_features, labels, selected_feature_indices, consensus_params=consensus)
 
     export_root = export_folder or os.path.join(os.getcwd(), 'feature_exports')
@@ -398,6 +423,13 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         modality_presence_indices,
     )
     feature_exports['selected'] = selected_features_csv
+    
+    print(f"  [INFO] Final model information:")
+    print(f"    - PCA enabled: {preprocessor.pca is not None}")
+    if preprocessor.pca is not None:
+        print(f"    - PCA components: {preprocessor.pca.n_components_used}")
+    print(f"    - Feature indices keys: {list(selected_feature_indices.keys())}")
+    print(f"    - All modality features: {selected_feature_indices['all']}")
       
     return {
         'type': 'multimodal_xgb_ensemble',
@@ -416,6 +448,9 @@ def train_multimodal_ensemble(data_folder, verbose, csv_path, export_folder=None
         },
         'models': models,
         'preprocessor': preprocessor,
+        'pca_enabled': preprocessor.pca is not None,
+        'pca_n_components': preprocessor.pca.n_components_used if preprocessor.pca is not None else None,
+        'pca_variance_threshold': 0.95,
         'feature_exports': feature_exports,
         'cv_metrics': cv_metrics,
     }

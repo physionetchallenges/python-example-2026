@@ -236,7 +236,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-results_summaryEEG_I0002.csv
-results_summaryEEG_I0004.csv
-results_summaryEEG_I0006.csv
-results_summaryEEG_I0007.csv
+
+movedata.py

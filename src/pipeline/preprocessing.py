@@ -1,19 +1,22 @@
 import numpy as np
 from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 from .config import FEATURE_CORRELATION_THRESHOLD
 
 
 DEFAULT_KNN_NEIGHBORS = 5
+PCA_VARIANCE_THRESHOLD = 0.7
 
 
-def build_preprocessor(num_samples, categorical_indices=None):
+def build_preprocessor(num_samples, categorical_indices=None, apply_pca=False):
     neighbors = min(DEFAULT_KNN_NEIGHBORS, max(1, num_samples - 1)) if num_samples > 1 else 1
     return CorrelationAwarePreprocessor(
         n_neighbors=neighbors,
         categorical_indices=categorical_indices,
         correlation_threshold=FEATURE_CORRELATION_THRESHOLD,
+        apply_pca=apply_pca,
     )
 
 
@@ -91,8 +94,67 @@ class CorrelationThresholdSelector:
         return np.asarray([input_features[index] for index in self.selected_indices_], dtype=object)
 
 
+class PCAReducer:
+    """Applies PCA for dimensionality reduction while preserving a specified variance threshold."""
+    
+    def __init__(self, variance_threshold=PCA_VARIANCE_THRESHOLD):
+        self.variance_threshold = float(variance_threshold)
+        self.pca = None
+        self.n_components_used = None
+
+    def fit(self, X):
+        """Fit PCA to the data, determining optimal number of components."""
+        X = np.asarray(X, dtype=np.float32)
+        
+        if X.shape[0] < 2 or X.shape[1] < 2:
+            self.pca = None
+            self.n_components_used = X.shape[1]
+            return self
+        
+        # Fit PCA with all possible components initially
+        n_components = min(X.shape[0] - 1, X.shape[1])
+        temp_pca = PCA(n_components=n_components, random_state=42)
+        temp_pca.fit(X)
+        
+        # Calculate cumulative variance explained
+        cumsum_var = np.cumsum(temp_pca.explained_variance_ratio_)
+        
+        # Find number of components needed for target variance
+        n_comp = np.argmax(cumsum_var >= self.variance_threshold) + 1
+        n_comp = max(1, min(n_comp, n_components))
+        
+        # Fit final PCA with optimal components
+        self.pca = PCA(n_components=n_comp, random_state=42)
+        self.pca.fit(X)
+        self.n_components_used = n_comp
+        
+        return self
+
+    def transform(self, X):
+        """Transform data using fitted PCA."""
+        X = np.asarray(X, dtype=np.float32)
+        
+        if self.pca is None:
+            return X
+        
+        return np.asarray(self.pca.transform(X), dtype=np.float32)
+
+    def fit_transform(self, X):
+        """Fit PCA and transform data."""
+        self.fit(X)
+        return self.transform(X)
+
+    def get_feature_names_out(self, input_features=None):
+        """Generate names for PCA components."""
+        if self.pca is None:
+            return input_features if input_features is not None else np.array(['feature_0'])
+        
+        n_features = self.pca.n_components_
+        return np.asarray([f'PCA_{i}' for i in range(n_features)], dtype=object)
+
+
 class CorrelationAwarePreprocessor:
-    def __init__(self, n_neighbors, categorical_indices, correlation_threshold):
+    def __init__(self, n_neighbors, categorical_indices, correlation_threshold, apply_pca=True):
         self.n_neighbors = n_neighbors
         if categorical_indices is None:
             self.categorical_indices = np.array([], dtype=np.int32)
@@ -101,6 +163,7 @@ class CorrelationAwarePreprocessor:
         self.imputer = KNNImputer(n_neighbors=n_neighbors, keep_empty_features=True)
         self.scaler = StandardScaler()
         self.selector = CorrelationThresholdSelector(correlation_threshold)
+        self.pca = PCAReducer() if apply_pca else None
         self._numerical_indices = np.array([], dtype=np.int32)
 
     def _get_numerical_indices(self, n_features):
@@ -129,14 +192,30 @@ class CorrelationAwarePreprocessor:
         self._numerical_indices = self._get_numerical_indices(X.shape[1])
         X_out = self._scale_numerical_columns(X_imputed, fit=True)
         self.selector.fit(X_out)
-        return np.asarray(self.selector.transform(X_out), dtype=np.float32)
+        X_selected = np.asarray(self.selector.transform(X_out), dtype=np.float32)
+        
+        # Apply PCA if enabled
+        if self.pca is not None:
+            X_final = self.pca.fit_transform(X_selected)
+        else:
+            X_final = X_selected
+        
+        return np.asarray(X_final, dtype=np.float32)
 
     def transform(self, X):
         X = np.asarray(X, dtype=np.float32).copy()
         X[~np.isfinite(X)] = np.nan
         X_imputed = np.asarray(self.imputer.transform(X), dtype=np.float32)
         X_out = self._scale_numerical_columns(X_imputed, fit=False)
-        return np.asarray(self.selector.transform(X_out), dtype=np.float32)
+        X_selected = np.asarray(self.selector.transform(X_out), dtype=np.float32)
+        
+        # Apply PCA if enabled
+        if self.pca is not None:
+            X_final = self.pca.transform(X_selected)
+        else:
+            X_final = X_selected
+        
+        return np.asarray(X_final, dtype=np.float32)
 
     def transform_feature_indices(self, feature_indices):
         if self.selector.selected_indices_ is None:
@@ -157,4 +236,10 @@ class CorrelationAwarePreprocessor:
         return remapped
 
     def get_feature_names_out(self, input_features=None):
-        return self.selector.get_feature_names_out(input_features)
+        selector_names = self.selector.get_feature_names_out(input_features)
+        
+        # If PCA is applied, return PCA component names
+        if self.pca is not None:
+            return self.pca.get_feature_names_out(selector_names)
+        
+        return selector_names
