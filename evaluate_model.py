@@ -60,12 +60,12 @@ def compute_prevalence(ages, prevalence_labels, prevalence_ages, gap=0):
 
     age_to_prevalence = dict()
     for age in age_to_labels:
-        age_to_prevalence[age] = sum(age_to_labels[age])/len(age_to_labels[age])
+        age_to_prevalence[age] = max(sum(age_to_labels[age]), 0.5)/len(age_to_labels[age])
 
     return age_to_prevalence
 
 # Compute a prevalence-based reward metric.
-def compute_reward(labels, predictions, ages, age_to_prevalence, min_prevalence=1e-6, max_prevalence=1-1e-6):
+def compute_reward(labels, predictions, ages, age_to_prevalence):
     m = len(labels)
     n = len(predictions)
     o = len(ages)
@@ -77,7 +77,7 @@ def compute_reward(labels, predictions, ages, age_to_prevalence, min_prevalence=
     for i in range(n):
         if np.isfinite(ages[i]):
             p = age_to_prevalence[ages[i]]
-            p = min(max(p, min_prevalence), max_prevalence) # Ensure p is strictly greater than 0 and strictly less than 1.
+            p = min(max(p, 0.5/m), 1 - 0.5/m) # Ensure p is strictly greater than 0 and strictly less than 1.
 
             if labels[i] == 1 and predictions[i] == 1:
                 scores[i] = 1/p - 1
@@ -266,12 +266,12 @@ def evaluate_model(labels_files, predictions_files, prevalence_files):
         age = df_prevalence.loc[patient, id_age]
         prevalence_ages[i] = age
 
-    age_to_prevalence = compute_prevalence(ages, prevalence_labels, prevalence_ages, gap=1)
+    age_to_prevalence = compute_prevalence(ages, prevalence_labels, prevalence_ages, gap=2)
 
     # Evaluate the predictions.
     reward = compute_reward(labels, binary_predictions, ages, age_to_prevalence)
-    auroc_age = compute_auroc_age(labels, probability_predictions, ages, gap=1)
-    auroc_weighted = compute_auroc_weighted(labels, probability_predictions, ages, gap=1)
+    auroc_age = compute_auroc_age(labels, probability_predictions, ages, gap=2)
+    auroc_weighted = compute_auroc_weighted(labels, probability_predictions, ages, gap=2)
     auroc = compute_auroc(labels, probability_predictions)
     auprc = compute_auprc(labels, probability_predictions)
     accuracy = compute_accuracy(labels, binary_predictions)
@@ -280,7 +280,7 @@ def evaluate_model(labels_files, predictions_files, prevalence_files):
     table = list()
     
     header = ['Age', 'Prevalence (prevalence data)', '# positive labels (prevalence data)', '# negative labels (prevalence data)', \
-              '# positive labels', '# positive labels', '# positive predictions', '# negative predictions', \
+              '# positive labels', '# negative labels', '# positive predictions', '# negative predictions', \
               '# true positives', '# false positives', '# false negatives', '# true negatives']
     table.append(header)
 
