@@ -90,3 +90,10 @@ dev_outputs_v2/
 features/FEATURES.md
 CLAUDE.md
 build_dev_subset.py
+learning_log.md
+eda_outputs/
+docker_outputs/
+
+#files
+phase1_eda.py
+loso_cv.py

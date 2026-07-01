@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 
 # Team Narnia — PhysioNet Challenge 2026
+# Entry 2: Dropped site-confounded absolute Hjorth features.
+#           Replaced with within-recording ratio features (site-stable).
+#           Tighter XGBoost regularization.
+#           Fixed N3 gradient + redesigned spontaneous arousal.
 #
-# This file contains the three required entry-point functions only.
-# All feature extraction logic lives in the features/ folder.
-# See features/FEATURES.md for the full feature registry and iteration history.
+# See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
 ################################################################################
 # Libraries
@@ -20,13 +22,15 @@ from tqdm import tqdm
 
 from helper_code import *
 
-# Feature modules — see features/FEATURES.md for the full registry
-from features.demographic  import extract_demographic_features
-from features.physiological import extract_physiological_features
-from features.caisr_base   import extract_caisr_base_features
-from features.caisr_enriched import extract_caisr_enriched_features
-from features.human        import extract_human_annotations_features
-from features import N_PHYSIOLOGICAL_FEATURES, N_ALGORITHMIC_FEATURES
+# Feature modules
+from features.demographic        import extract_demographic_features
+from features.caisr_base         import extract_caisr_base_features
+from features.caisr_enriched     import extract_caisr_enriched_features
+from features.physiological_ratios import (extract_physiological_ratio_features,
+                                            N_RATIO_FEATURES)
+from features.human              import extract_human_annotations_features
+from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
+                      N_DEMOGRAPHIC_FEATURES)
 
 ################################################################################
 # Configuration
@@ -34,6 +38,11 @@ from features import N_PHYSIOLOGICAL_FEATURES, N_ALGORITHMIC_FEATURES
 
 SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
+
+# Fallback sizes for missing files
+_N_BASE     = N_CAISR_BASE_FEATURES      # 12
+_N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
+_N_RATIO    = N_RATIO_FEATURES           # 15
 
 ################################################################################
 # Required functions
@@ -71,7 +80,7 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
             # ── Demographics ─────────────────────────────────────────────────
             demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
             patient_data = load_demographics(demo_file, patient_id, session_id)
-            demo_features = extract_demographic_features(patient_data)
+            demo_f = extract_demographic_features(patient_data)
 
             # ── Physiological EDF ─────────────────────────────────────────────
             phys_file = os.path.join(
@@ -79,11 +88,10 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
                 site_id, f'{patient_id}_ses-{session_id}.edf')
             if not os.path.exists(phys_file):
                 if verbose:
-                    tqdm.write(f'  ! Missing physiological EDF for {patient_id} — skipping.')
+                    tqdm.write(
+                        f'  ! Missing physiological EDF for {patient_id} — skipping.')
                 continue
             phys_data, phys_fs = load_signal_data(phys_file)
-            phys_features = extract_physiological_features(
-                phys_data, phys_fs, csv_path=csv_path)
 
             # ── CAISR Annotations ─────────────────────────────────────────────
             algo_file = os.path.join(
@@ -93,12 +101,16 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
                 algo_data, _ = load_signal_data(algo_file)
                 caisr_base     = extract_caisr_base_features(algo_data)
                 caisr_enriched = extract_caisr_enriched_features(algo_data)
+                # Ratio features require BOTH phys + CAISR
+                ratio_f = extract_physiological_ratio_features(
+                    phys_data, phys_fs, algo_data, csv_path=csv_path)
             else:
                 tqdm.write(
                     f'Error loading EDF file: [Errno 2] No such file or directory: '
                     f"'{algo_file}'")
-                caisr_base     = np.full(12, float('nan'))
-                caisr_enriched = np.full(11, float('nan'))
+                caisr_base     = np.full(_N_BASE,     float('nan'))
+                caisr_enriched = np.full(_N_ENRICHED, float('nan'))
+                ratio_f        = np.full(_N_RATIO,    float('nan'))
 
             # ── Human Annotations (training only — not used in model) ─────────
             human_file = os.path.join(
@@ -114,20 +126,19 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
 
             if label == 0 or label == 1:
                 features.append(np.hstack([
-                    demo_features,
-                    phys_features,
+                    demo_f,
                     caisr_base,
                     caisr_enriched,
+                    ratio_f,
                 ]))
                 labels.append(label)
 
-            # Free large arrays
-            if 'phys_data' in locals():   del phys_data
-            if 'algo_data' in locals():   del algo_data
-            if 'human_data' in locals():  del human_data
+            if 'phys_data'  in locals(): del phys_data
+            if 'algo_data'  in locals(): del algo_data
+            if 'human_data' in locals(): del human_data
 
         except Exception as e:
-            tqdm.write(f'  !!! Error processing record {i+1} ({patient_id}): {e}')
+            tqdm.write(f'  !!! Error on record {i+1} ({patient_id}): {e}')
             continue
 
     pbar.close()
@@ -140,18 +151,24 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
         n_neg = int((~labels).sum())
         print(f'Training on {len(labels)} patients '
               f'({n_pos} positive, {n_neg} negative)...')
+        print(f'Feature vector shape: {features.shape}')
 
-    # ── XGBoost with class-imbalance weighting ────────────────────────────────
+    # ── XGBoost — tighter regularization than entry 1 ────────────────────────
+    # Entry 1 used depth=4, subsample=0.8, colsample=0.8, no explicit L1/L2.
+    # LOSO showed overfitting to within-site patterns → increase regularization.
     n_pos = int(labels.sum())
     n_neg = int((~labels).sum())
     scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
 
     xgb = XGBClassifier(
         n_estimators     = 300,
-        max_depth        = 4,
+        max_depth        = 3,       # reduced: 4 → 3
         learning_rate    = 0.05,
-        subsample        = 0.8,
-        colsample_bytree = 0.8,
+        subsample        = 0.7,     # reduced: 0.8 → 0.7
+        colsample_bytree = 0.6,     # reduced: 0.8 → 0.6
+        reg_alpha        = 0.1,     # new: L1 regularization
+        reg_lambda       = 2.0,     # new: L2 regularization (default was 1.0)
+        min_child_weight = 5,       # new: minimum samples per leaf
         scale_pos_weight = scale_pos_weight,
         random_state     = 42,
         eval_metric      = 'auc',
@@ -162,7 +179,6 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
         ('imputer',    SimpleImputer(strategy='median')),
         ('classifier', xgb),
     ])
-
     model.fit(features, labels)
 
     os.makedirs(model_folder, exist_ok=True)
@@ -187,35 +203,39 @@ def run_model(model, record, data_folder, verbose):
     # ── Demographics ──────────────────────────────────────────────────────────
     demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
     patient_data = load_demographics(demo_file, patient_id, session_id)
-    demo_features = extract_demographic_features(patient_data)
+    demo_f = extract_demographic_features(patient_data)
 
     # ── Physiological EDF ─────────────────────────────────────────────────────
     phys_file = os.path.join(
         data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER,
         site_id, f'{patient_id}_ses-{session_id}.edf')
+    phys_data = phys_fs = None
     if os.path.exists(phys_file):
         phys_data, phys_fs = load_signal_data(phys_file)
-        phys_features = extract_physiological_features(phys_data, phys_fs)
-    else:
-        phys_features = np.full(N_PHYSIOLOGICAL_FEATURES, float('nan'))
 
     # ── CAISR Annotations ─────────────────────────────────────────────────────
     algo_file = os.path.join(
         data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
         site_id, f'{patient_id}_ses-{session_id}_caisr_annotations.edf')
     if os.path.exists(algo_file):
-        algo_data, _   = load_signal_data(algo_file)
+        algo_data, _ = load_signal_data(algo_file)
         caisr_base     = extract_caisr_base_features(algo_data)
         caisr_enriched = extract_caisr_enriched_features(algo_data)
+        if phys_data is not None:
+            ratio_f = extract_physiological_ratio_features(
+                phys_data, phys_fs, algo_data)
+        else:
+            ratio_f = np.full(_N_RATIO, float('nan'))
     else:
-        caisr_base     = np.full(12, float('nan'))
-        caisr_enriched = np.full(11, float('nan'))
+        caisr_base     = np.full(_N_BASE,     float('nan'))
+        caisr_enriched = np.full(_N_ENRICHED, float('nan'))
+        ratio_f        = np.full(_N_RATIO,    float('nan'))
 
     features = np.hstack([
-        demo_features,
-        phys_features,
+        demo_f,
         caisr_base,
         caisr_enriched,
+        ratio_f,
     ]).reshape(1, -1)
 
     binary_output      = model.predict(features)[0]

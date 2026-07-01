@@ -6,7 +6,11 @@
 #                    stage-conditional AHI, N3 gradient, spontaneous
 #                    arousal index, N3 confidence entropy  [11 features]
 #
-
+# Planned (not yet implemented):
+#   - PLM periodicity index (PLM / isolated LM ratio)        Week 3+
+#   - CAISR no-arousal confidence entropy (caisr_prob_no-ar)  Week 3+
+#   - Stage transition rate                                   Week 3+
+#   - REM latency                                             Week 3+
 
 import numpy as np
 
@@ -97,16 +101,30 @@ def extract_caisr_enriched_features(algo_data):
     # [8] N3 temporal gradient
     # Healthy sleep front-loads N3 (ratio >> 1).
     # CI-risk pattern: ratio compressed toward 1.
+    #
+    # Bug fixed (2026-07-01): original code used 1e-6 as denominator guard,
+    # producing values of 20,000-150,000 when n3_second == 0 (common in
+    # elderly / CI+ patients who have no N3 in the second half of the night).
+    # Fix: return NaN when n3_second < 1% (degenerate case — not meaningful
+    # as a ratio), and cap at 10.0 for remaining edge cases.
     if len(valid_stages) > 1:
-        mid         = len(valid_stages) // 2
-        n3_first    = float(np.mean(valid_stages[:mid] == 1))
-        n3_second   = float(np.mean(valid_stages[mid:]  == 1))
-        n3_gradient = n3_first / (n3_second + 1e-6)
+        mid       = len(valid_stages) // 2
+        n3_first  = float(np.mean(valid_stages[:mid] == 1))
+        n3_second = float(np.mean(valid_stages[mid:]  == 1))
+        if n3_second < 0.01:
+            # No meaningful N3 in second half — gradient is not defined as ratio.
+            # Use a signed indicator instead: positive = any first-half N3 exists.
+            n3_gradient = float('nan')
+        else:
+            n3_gradient = min(n3_first / n3_second, 10.0)  # cap at 10
     else:
         n3_gradient = float('nan')
 
-    # [9] Spontaneous arousal index
-    # Arousals not coincident with a respiratory event (AASM ±15s window).
+    # [9] Spontaneous arousal index — REDESIGNED v2 (2026-07-01)
+    # Original: computed per total recording hour → confounded by REM amount
+    # (CI+ have less REM → fewer arousals regardless of biology).
+    # Fix: compute per NREM hour only — removes the REM confound.
+    # Spontaneous = arousals not coincident with a respiratory event (±15s).
     spont_arousal_idx = float('nan')
     if len(arousal) > 0 and len(resp) > 0:
         n_1s = min(len(arousal) // 2, len(resp))
@@ -121,10 +139,21 @@ def extract_caisr_enriched_features(algo_data):
                 window = resp_1s[max(0, s - 5):min(n_1s, s + 15)]
                 if len(window) > 0 and window.any():
                     n_resp_coincident += 1
-            n_spont        = max(0, len(ar_starts) - n_resp_coincident)
-            t_hours_1s     = n_1s / 3600.0
-            if t_hours_1s > 0:
-                spont_arousal_idx = n_spont / t_hours_1s
+            n_spont = max(0, len(ar_starts) - n_resp_coincident)
+
+            # Use NREM hours as denominator (not total recording hours)
+            # NREM mask from stage_caisr upsampled to 1s resolution
+            if len(valid_stages) > 0:
+                stage_1s_ar   = np.repeat(valid_stages, 30)[:n_1s]
+                nrem_mask_ar  = (stage_1s_ar >= 1) & (stage_1s_ar <= 3)
+                nrem_hours_ar = float(nrem_mask_ar.sum()) / 3600.0
+                if nrem_hours_ar > 0:
+                    spont_arousal_idx = n_spont / nrem_hours_ar
+            else:
+                # Fallback: use total recording hours if no stage data
+                t_hours_1s = n_1s / 3600.0
+                if t_hours_1s > 0:
+                    spont_arousal_idx = n_spont / t_hours_1s
 
     # [10] N3 confidence entropy
     # Binary entropy on caisr_prob_n3: higher = more ambiguous staging.
