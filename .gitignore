@@ -55,6 +55,7 @@ results/
 logs/
 *.log
 
+
 # macOS
 .DS_Store
 .AppleDouble
@@ -78,4 +79,14 @@ htmlcov/
 
 #measurment artifacts
 *.edf
-
+*.sav
+full_model/
+full_outputs/
+docker_model/
+dev_model/
+dev_outputs/
+dev_model_v2/
+dev_outputs_v2/
+features/FEATURES.md
+CLAUDE.md
+build_dev_subset.py
