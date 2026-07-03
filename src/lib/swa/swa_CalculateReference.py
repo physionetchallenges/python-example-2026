@@ -29,7 +29,7 @@ def swa_CalculateReference(data, Info, display_plot=False):
     if 'Recording' not in Info or 'sRate' not in Info['Recording']:
         raise ValueError("Error: No sampling rate information found in Info['Recording']")
     if 'Parameters' not in Info:
-        from swa_getInfoDefaults import swa_getInfoDefaults  # Evitar importación cíclica
+        from src.lib.swa.swa_getInfoDefaults import swa_getInfoDefaults  # Evitar importación cíclica
         Info = swa_getInfoDefaults(Info, 'SW', 'envelope')
         print("Warning: No parameters specified; using defaults.")
         
@@ -40,32 +40,32 @@ def swa_CalculateReference(data, Info, display_plot=False):
     
     # 2. Ajuste y proyección 2D de las coordenadas de los electrodos
     # MATLAB: Th = pi/180*[Info.Electrodes.theta]; Rd = [Info.Electrodes.radius];
-    e_locs = Info['Electrodes']
-    # Soporta si e_locs es una lista de objetos o una lista de dicts (desde el JSON)
-    theta = np.array([getattr(el, 'theta', el.get('theta')) for el in e_locs], dtype=float)
-    radius = np.array([getattr(el, 'radius', el.get('radius')) for el in e_locs], dtype=float)
+    # e_locs = Info['Electrodes']
+    # # Soporta si e_locs es una lista de objetos o una lista de dicts (desde el JSON)
+    # theta = np.array([getattr(el, 'theta', el.get('theta')) for el in e_locs], dtype=float)
+    # radius = np.array([getattr(el, 'radius', el.get('radius')) for el in e_locs], dtype=float)
     
-    Th = (np.pi / 180.0) * theta
-    x = radius * np.cos(Th)
-    y = radius * np.sin(Th)
+    # Th = (np.pi / 180.0) * theta
+    # x = radius * np.cos(Th)
+    # y = radius * np.sin(Th)
     
-    # Encajonar las coordenadas en un rango de -0.5 a 0.5
-    intrad = min(1.0, max(np.abs(radius)))
-    intrad = max(intrad, 0.5)
-    squeezefac = 0.5 / intrad
-    x = x * squeezefac
-    y = y * squeezefac
+    # # Encajonar las coordenadas en un rango de -0.5 a 0.5
+    # intrad = min(1.0, max(np.abs(radius)))
+    # intrad = max(intrad, 0.5)
+    # squeezefac = 0.5 / intrad
+    # x = x * squeezefac
+    # y = y * squeezefac
     
     # Inicializar figura si flag_plot está activo
     fig_topo, ax_topo = None, None
-    if display_plot:
-        fig_topo, ax_topo = plt.subplots(figsize=(6, 6))
-        ax_topo.scatter(y, x, s=30, edgecolors=[0.5, 0.5, 0.5], facecolors=[0.5, 0.5, 0.5], label='All Electrodes')
-        ax_topo.set_aspect('equal')
-        ax_topo.axis('off')
+    # if display_plot:
+    #     fig_topo, ax_topo = plt.subplots(figsize=(6, 6))
+    #     ax_topo.scatter(y, x, s=30, edgecolors=[0.5, 0.5, 0.5], facecolors=[0.5, 0.5, 0.5], label='All Electrodes')
+    #     ax_topo.set_aspect('equal')
+    #     ax_topo.axis('off')
         
     n_samples = data.shape[1]
-    n_total_ch = len(x)
+    n_total_ch = len(Info['Electrodes'])
     
     # =========================================================================
     # SELECCIÓN POR MÉTODOS
@@ -73,14 +73,14 @@ def swa_CalculateReference(data, Info, display_plot=False):
     
     if ref_method == 'envelope':
         # Evitar canales externos/periféricos si está configurado
-        if Info['Parameters'].get('Ref_UseInside', True):
-            distances = np.sqrt(x**2 + y**2)
-            # Guardar máscara (1 fila, n_canales)
-            Info['Parameters']['Ref_Electrodes'] = distances < 0.35
-            working_data = data.iloc[Info['Parameters']['Ref_Electrodes'], :]
-        else:
-            Info['Parameters']['Ref_Electrodes'] = np.ones(n_total_ch, dtype=bool)
-            working_data = data
+        # if Info['Parameters'].get('Ref_UseInside', True):
+        #     distances = np.sqrt(x**2 + y**2)
+        #     # Guardar máscara (1 fila, n_canales)
+        #     Info['Parameters']['Ref_Electrodes'] = distances < 0.35
+        #     working_data = data.iloc[Info['Parameters']['Ref_Electrodes'], :]
+        # else:
+        Info['Parameters']['Ref_Electrodes'] = np.ones(n_total_ch, dtype=bool)
+        working_data = data
             
         # Ordenar muestras para obtener el percentil de negatividad
         rData = np.sort(working_data, axis=0)
@@ -91,6 +91,7 @@ def swa_CalculateReference(data, Info, display_plot=False):
             nData = np.mean(rData[1:nCh, :], axis=0, keepdims=True)
         else:
             nData = np.mean(rData[0:nCh, :], axis=0, keepdims=True)
+            nData = rData
             
     elif ref_method in ['square', 'diamond']:
         distance_from_center = 0.2
@@ -196,7 +197,7 @@ def swa_CalculateReference(data, Info, display_plot=False):
         print(f"Calculation: Applying {Info['Parameters']['Filter_Method']} filter for [{Info['Parameters']['Filter_hPass']:.1f}, {Info['Parameters']['Filter_lPass']:.1f}] Hz...")
         
         # Llamar a la función previamente traducida
-        from lib.swa.swa_filter_data import swa_filter_data
+        from src.lib.swa.swa_filter_data import swa_filter_data
         filtData = swa_filter_data(nData, Info)
         print("Done")
     else:

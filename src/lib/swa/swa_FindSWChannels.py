@@ -1,9 +1,9 @@
 import numpy as np
 from tqdm import tqdm
-from lib.swa.swa_channelNeighbours import swa_channelNeighbours
-from lib.swa.swa_filter_data import swa_filter_data
-from lib.swa.swa_xcorr import swa_xcorr, swa_xcorr2, swa_xcorr_ultra
-from lib.swa.swa_cluster_test import swa_cluster_test
+from .swa_channelNeighbours import swa_channelNeighbours
+from .swa_filter_data import swa_filter_data
+from .swa_xcorr import swa_xcorr, swa_xcorr2, swa_xcorr_ultra
+from .swa_cluster_test import swa_cluster_test
 
 def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
     """

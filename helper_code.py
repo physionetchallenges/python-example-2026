@@ -15,7 +15,7 @@ import sys
 from typing import Dict, List, Tuple, Any, Union, Tuple, Optional
 from collections import defaultdict
 
-DEMOGRAPHICS_FILE = 'demographics.csv'
+DEMOGRAPHICS_FILE = 'training_set/demographics.csv'
 PHYSIOLOGICAL_DATA_SUBFOLDER = 'physiological_data'
 ALGORITHMIC_ANNOTATIONS_SUBFOLDER = 'algorithmic_annotations'
 HUMAN_ANNOTATIONS_SUBFOLDER = 'human_annotations'

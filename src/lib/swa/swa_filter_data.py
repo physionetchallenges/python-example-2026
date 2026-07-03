@@ -43,7 +43,7 @@ def swa_filter_data(data, Info):
         bbp, abp = signal.cheby2(n, Rs, Wn, btype='bandpass')
         
         # Aplicar el filtro de fase cero a lo largo del eje del tiempo (axis=-1)
-        filtData = signal.filtfilt(bbp, abp, data, axis=-1)
+        filtData = signal.filtfilt(bbp, abp, data, axis=0)
 
     # =========================================================================
     # METODO BUTTERWORTH (Soporta la errata 'buttersworth' del script original)

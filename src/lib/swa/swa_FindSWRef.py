@@ -37,7 +37,7 @@ def swa_FindSWRef(Data, Info, SW=None):
     OSWCount = len(SW)
     SWCount = len(SW)
     
-    number_ref_waves = Data['SWRef'].shape[0]
+    number_ref_waves = Data['SWRef'].shape[1]
     
     # Inicializar vectores de umbrales según el criterio
     if p.get('Ref_AmplitudeCriteria') == 'relative':
@@ -63,13 +63,13 @@ def swa_FindSWRef(Data, Info, SW=None):
         if ref_wave > 0:
             OSWCount = len(SW)
             
-        ref_signal = Data['SWRef'][ref_wave, :]
+        ref_signal = Data['SWRef'][:, ref_wave]
         
         # Calcular la derivada de la señal (añadiendo un 0 inicial para mantener longitud)
         slopeData = np.concatenate(([0], np.diff(ref_signal)))
         
         # Extraer Mínimos (MNP - Maximum Negative Peaks) y Máximos (MPP)
-        from lib.swa.swa_get_peaks import swa_get_peaks
+        from src.lib.swa.swa_get_peaks import swa_get_peaks
         MNP, MPP = swa_get_peaks(slopeData, Info, True)
 
         MNP = MNP[1:]

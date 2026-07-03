@@ -11,6 +11,22 @@ EEG_CHANNEL_SPECS = {
     'F4-M1': {'direct': 'f4-m1', 'positive': 'f4', 'reference': 'm1'},
 }
 EEG_FEATURE_SPECS = [
+    ('C3-M2', 'TotalSW'),
+    ('C3-M2', 'SWpeakAmp_mean'),
+    ('C3-M2', 'SWp2p_mean'),
+    ('C3-M2', 'SWnegSlope_mean'),
+    ('C4-M1', 'TotalSW'),
+    ('C4-M1', 'SWpeakAmp_mean'),
+    ('C4-M1', 'SWp2p_mean'),
+    ('C4-M1', 'SWnegSlope_mean'),
+    ('F3-M2', 'TotalSW'),
+    ('F3-M2', 'SWpeakAmp_mean'),
+    ('F3-M2', 'SWp2p_mean'),
+    ('F3-M2', 'SWnegSlope_mean'),
+    ('F4-M1', 'TotalSW'),
+    ('F4-M1', 'SWpeakAmp_mean'),
+    ('F4-M1', 'SWp2p_mean'),
+    ('F4-M1', 'SWnegSlope_mean'),
     ('C3-M2', 'Hjorth_Complexity'),
     ('C4-M1', 'Hjorth_Complexity'),
     ('F3-M2', 'Hjorth_Complexity'),
@@ -146,6 +162,12 @@ def _extract_channel_metrics(signal, fs):
         str(name): float(value)
         for name, value in patient_profile.replace([np.inf, -np.inf], np.nan).items()
     }
+
+    SW_features = eeg_features.get_SW_features(signal, fs)
+    for feature_name in SW_features:
+        value = SW_features[feature_name]
+        metrics[feature_name] = float(np.nan if pd.isna(value) else value)
+
     for complexity_name in ('Hjorth_Mobility', 'Hjorth_Complexity'):
         if complexity_name in complexities:
             value = complexities[complexity_name].replace([np.inf, -np.inf], np.nan).std()

@@ -5,6 +5,10 @@ import numpy as np
 from scipy.signal import welch
 import pandas as pd
 from scipy.stats import kurtosis, entropy
+from src.lib.swa import swa_getInfoDefaults 
+from src.lib.swa import swa_CalculateReference
+from src.lib.swa import swa_FindSWRef
+from src.lib.swa import swa_FindSWChannels
 
 def _safe_sqrt_variance_ratio(numerator_signal, denominator_signal):
     numerator_var = np.var(numerator_signal)
@@ -60,6 +64,20 @@ def extract_band_powers(epochs, fs, win_len = 2):
         complexities.append({'Hjorth_Mobility': mobility, 'Hjorth_Complexity': complexity})
 
     return pd.DataFrame(features), pd.DataFrame(complexities)
+
+def get_SW_features(signal, fs):
+    info = swa_getInfoDefaults.swa_getInfoDefaults({}, 'SW', method='envelope')
+    info['Electrodes'] = ['Ej']
+    info['Recording'] = {}
+    info['Recording']['sRate'] = fs
+
+    data = {}
+    data['Raw'] = pd.DataFrame({'Signal': signal})
+    data['SWRef'], Info  = swa_CalculateReference.swa_CalculateReference (data['Raw'], info, False)
+    Info['Parameters']['Ref_InspectionPoint'] = 'ZC'
+    data, Info, SW    = swa_FindSWRef.swa_FindSWRef (data, Info)
+    data, Info, SW    = swa_FindSWChannels.swa_FindSWChannels (data, Info, SW)
+    return SW
 
 def get_patient_profile(df_features):
     total_power = df_features.sum(axis=1)

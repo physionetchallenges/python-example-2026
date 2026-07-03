@@ -375,7 +375,7 @@ def _compute_record_feature_vector(patient_data, data_folder, site_id, patient_i
         patient_id,
         session_id,
     )
-
+    print(f"Extracting features for patient {patient_id}, session {session_id} from file: {physiological_data_file}")
     if os.path.exists(physiological_data_file):
         physiological_data, physiological_fs = _load_required_signal_data(physiological_data_file, csv_path)
         physiological_features = extract_extended_physiological_features(
