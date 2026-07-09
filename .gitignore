@@ -96,6 +96,6 @@ docker_outputs/
 
 #files
 phase1_eda.py
-loso_cv.py
+/loso_cv.py
 archive_outputs/
 eda/
