@@ -3,34 +3,6 @@
 loso_cv.py — Team Narnia
 Leave-One-Site-Out cross-validation for honest local performance estimation.
 
-Trains on two sites, evaluates on the third, rotates through all meaningful
-holdout configurations. Produces age-conditioned AUROC to match the actual
-challenge scoring metric.
-
-Usage:
-    python loso_cv.py \
-        --data /path/to/training_set_small \
-        --out  ./loso_outputs
-
-Outputs (all in --out directory):
-    loso_results.csv        — per-fold per-feature-set results
-    loso_feature_impact.csv — feature importance delta vs baseline per fold
-    loso_summary.txt        — human-readable summary
-
-Notes:
-    - I0002 has ~54 patients (~10 positives) — too small to be a reliable
-      holdout. It is always included in training. Only S0001 and I0006 rotate
-      as holdout sites.
-    - Age-conditioned AUROC uses the same ±2yr window as evaluate_model.py.
-    - Run this after train_model.py has completed at least once so you know
-      the feature extraction pipeline is working end-to-end.
-    - Expect ~35-40 minutes total (two full training runs).
-"""
-#!/usr/bin/env python3
-"""
-loso_cv.py — Team Narnia
-Leave-One-Site-Out cross-validation for honest local performance estimation.
-
 RECONCILED 2026-07-09: the local copy of this file had fallen behind every
 Kaggle dataset version actually used to produce real results (confirmed via
 grep against the real local file -- it had none of --model-family,
@@ -624,6 +596,15 @@ def parse_args():
                          '(2026-07-09). Ignored for other model families.'))
     p.add_argument('--l1-ratio', type=float, default=None,
                    help='Required if --penalty elasticnet. Ignored otherwise.')
+    p.add_argument('--holdout-sites', default='I0006,S0001',
+                   help=('Comma-separated list of sites to rotate as LOSO holdout. '
+                         'Default "I0006,S0001" matches all prior runs (I0002 always '
+                         'in training). Added 2026-07-09 for cheap single-fold '
+                         'backfills, e.g. --holdout-sites I0002 to run ONLY the '
+                         'I0002-held-out fold (fast — no need to also re-run the '
+                         'I0006/S0001 folds, which are unaffected by whether I0002 '
+                         'itself is ever held out). Pass "I0006,S0001,I0002" for '
+                         'full 3-site rotation.'))
     p.add_argument('--verbose',  action='store_true', default=True)
     return p.parse_args()
 
@@ -709,7 +690,12 @@ def main():
         print(f'\nWrote {out_dir / "loso_model_diagnostic.csv"}')
         return
 
-    holdout_sites = ['I0006', 'S0001']
+    # NOTE (2026-07-09): was hardcoded to ['I0006', 'S0001']. Now configurable
+    # via --holdout-sites, so a single-fold backfill (e.g. just I0002, to
+    # complete the model-family x site matrix without re-running the full
+    # 2-fold cycle) doesn't require a separate script.
+    holdout_sites = [s.strip() for s in args.holdout_sites.split(',') if s.strip()]
+    print(f'  Holdout sites: {holdout_sites}')
 
     print('\nStep 2: Running LOSO folds ...')
     fold_results     = []
