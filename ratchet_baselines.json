@@ -1,32 +1,65 @@
 {
-  "_readme": "Hand-curated ratchet baselines. Do NOT let a script auto-overwrite these — same discipline as learning_log.md's decision log. Only promote a new run to a baseline here after you've deliberately decided to trust it (e.g. after a regression check + a decision-log entry), not automatically after every loso_cv.py run. n_pos/n_neg are POOLED across LOSO test folds (I0006 + S0001; I0002 is never a holdout, see learning_log.md 2026-07-01) and are required to compute the Hanley-McNeil comparison SE.",
+  "_readme": "Hand-curated ratchet baselines. Do NOT let a script auto-overwrite these — same discipline as learning_log.md's decision log. Only promote a new run to a baseline here after you've deliberately decided to trust it, not automatically after every loso_cv.py run. Schema (2026-07-08, corrected): 'folds' is a list of per-holdout-site {site, age_cond_auroc, n_pos, n_neg}. age_cond_auroc/reward at the top level are DERIVED (simple mean across folds) and shown for convenience/display only — the ratchet check recomputes from 'folds' directly, matching loso_cv.py's own 'Mean age-conditioned AUROC' convention (a plain average across folds, NOT weighted by fold size). This was corrected 2026-07-08 after a size-weighted version gave a materially different, wrong number (0.5411 vs the confirmed-correct 0.5443) on a real CatBoost run.\n\n'leaderboard_confirmed' (added 2026-07-08): whether THIS baseline's config has ever actually been submitted to the real Challenge leaderboard, as opposed to only evaluated locally via LOSO. This matters because the LOSO->leaderboard offset has already been shown to be unstable at small scale (Entry 1: LOSO 0.499 -> leaderboard 0.624, delta +0.125; Entry 2: LOSO 0.540 -> leaderboard 0.616, delta +0.076 — different sign of surprise each time, offset retired as a predictor 2026-07-02) and there is currently ZERO leaderboard data point at large scale — no large-set config has been submitted yet. A ratchet PASS against a leaderboard_confirmed=false baseline means 'at least as good as our best LOSO estimate so far', which is a materially weaker claim than 'at least as good as something we know performs on the real leaderboard.' See ratchet_check.py's printed CAUTION for how this is surfaced.",
 
   "small_entry3": {
     "description": "Entry 3 config: 48 features, XGBoost (depth=3, reg_alpha=0.1, reg_lambda=2.0, min_child_weight=5), CalibratedClassifierCV(sigmoid, cv=5), THRESHOLD=0.12. Small training set (1,103 patients).",
     "scale": "small",
     "model_family": "xgboost",
     "feature_count": 48,
+    "folds": [
+      {"site": "I0006", "age_cond_auroc": 0.5374, "n_pos": 20, "n_neg": 172},
+      {"site": "S0001", "age_cond_auroc": 0.5425, "n_pos": 56, "n_neg": 801}
+    ],
     "age_cond_auroc": 0.5399,
-    "n_pos": 76,
-    "n_neg": 973,
     "reward": 0.1148,
     "reward_threshold": 0.12,
     "date_confirmed": "2026-07-01",
-    "source": "learning_log.md, 2026-07-01 (later still) — Entry 3 LOSO results"
+    "source": "learning_log.md, 2026-07-01 (later still) — Entry 3 LOSO results",
+    "leaderboard_confirmed": true,
+    "leaderboard_auroc": 0.606,
+    "leaderboard_reward": null,
+    "leaderboard_standard_auroc": 0.772,
+    "leaderboard_accuracy": 0.803,
+    "leaderboard_note": "Entry 3 WAS submitted (3rd of 3 official entries: 0.624 -> 0.616 -> 0.606 age-cond AUROC). Exact reward figure still not on record, but per features/pipeline.py's PrefitCalibratedModel docstring (uploaded 2026-07-09): going Entry 2 -> Entry 3 (calibration added, nothing else changed), standard AUROC ROSE (0.746 -> 0.772) while age-conditioned AUROC AND REWARD BOTH FELL, and accuracy dropped sharply (0.866 -> 0.803) with F-measure barely moving — more patients called positive, at a cost. This corrects an earlier, more optimistic assumption in this project's history that calibration would likely also improve reward at Entry 3; it did not on the real leaderboard."
   },
 
   "large_logreg": {
-    "description": "PLACEHOLDER — fill in exact pooled n_pos/n_neg from loso_results.csv before using this as a gate. Logistic regression, large training set, cv5 calibration, age-residual features on. First result to clear the ~0.57-0.58 noise floor.",
+    "description": "Logistic regression, large training set (6,281 patients), cv5 calibration, age-residual features on. First result to clear the ~0.57-0.58 noise floor on BOTH folds independently. Fold n_pos/n_neg backfilled 2026-07-08 from the CatBoost run's loso_results.csv — same LOSO split, sizes are model-independent.",
     "scale": "large",
     "model_family": "logreg",
     "feature_count": 50,
+    "folds": [
+      {"site": "I0006", "age_cond_auroc": 0.6154, "n_pos": 112, "n_neg": 1030},
+      {"site": "S0001", "age_cond_auroc": 0.5850, "n_pos": 334, "n_neg": 4805}
+    ],
     "age_cond_auroc": 0.6002,
-    "n_pos": null,
-    "n_neg": null,
     "reward": 0.0719,
     "reward_threshold": 0.10,
     "date_confirmed": "2026-07-07",
-    "source": "learning_log.md, 2026-07-07 — Calibrated logistic regression entry",
-    "status": "NOT USABLE AS A GATE UNTIL n_pos/n_neg ARE FILLED IN"
+    "source": "learning_log.md, 2026-07-07 — Calibrated logistic regression entry; fold sizes confirmed 2026-07-08",
+    "leaderboard_confirmed": false,
+    "leaderboard_auroc": null,
+    "leaderboard_reward": null,
+    "leaderboard_note": "NOT YET SUBMITTED. No large-training-set config of any kind has been submitted to the real leaderboard as of 2026-07-08 — this is a LOSO-only estimate. Treat any ratchet PASS against this baseline as 'not worse than our best local estimate', not as a leaderboard guarantee."
+  },
+
+  "large_xgboost_age_resid": {
+    "description": "XGBoost, large training set, cv5 calibration, WITH age-residual features (Entry 4 config, 50 features). Reference point for the reward-collapse investigation — NOT a recommended submission candidate given logreg's AUROC advantage at no reward cost.",
+    "scale": "large",
+    "model_family": "xgboost",
+    "feature_count": 50,
+    "folds": [
+      {"site": "I0006", "age_cond_auroc": 0.5485, "n_pos": 112, "n_neg": 1030},
+      {"site": "S0001", "age_cond_auroc": 0.5392, "n_pos": 334, "n_neg": 4805}
+    ],
+    "age_cond_auroc": 0.5438,
+    "reward": 0.0726,
+    "reward_threshold": 0.12,
+    "date_confirmed": "2026-07-05",
+    "source": "learning_log.md, 2026-07-05 / 2026-07-06 — large-set XGBoost runs; fold sizes confirmed 2026-07-08",
+    "leaderboard_confirmed": false,
+    "leaderboard_auroc": null,
+    "leaderboard_reward": null,
+    "leaderboard_note": "NOT YET SUBMITTED. Same caveat as large_logreg — no large-set config has ever been submitted."
   }
 }

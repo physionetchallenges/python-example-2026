@@ -24,20 +24,22 @@ available to build against. This script:
 IMPORTANT — things this script assumes that you should confirm before
 trusting cross-comparisons against existing baselines:
 
-1. REWARD PREVALENCE REFERENCE: compute_prevalence(ages, prevalence_labels,
-   prevalence_ages, gap) needs a reference population to define age-local
-   prevalence. This script defaults to using the pooled LOSO test set itself
-   as its own prevalence reference (self-referential) if --prevalence-file
-   isn't given. If loso_cv.py uses a DIFFERENT reference (e.g. the full
-   large training set including train-fold patients), reward numbers from
-   this script are only comparable to each other WITHIN this script's own
-   runs, not numerically comparable to loso_cv.py's reward figures (e.g.
-   0.0719 for large_logreg). AUROC comparisons are unaffected either way.
+1. REWARD PREVALENCE REFERENCE: CONFIRMED 2026-07-09 against two real runs
+   (exact reproduction on every threshold tested) — the prevalence
+   reference is the FULL labeled population across ALL sites, including
+   whichever site wasn't held out in a given LOSO run. This script now
+   passes the complete --features-cache population (age, y) as that
+   reference automatically, since your cache should already include every
+   site regardless of rotation scheme (I0002 is always at least in
+   training). No separate prevalence file needed as long as your cache is
+   built from the full dataset, not a pre-filtered subset.
 
 2. SCALING: build_logreg_pipeline() (features/pipeline.py) adds a
    StandardScaler that was not confirmed to exist in whatever produced the
    0.6002 large-set baseline. See that file's docstring for why this
-   matters for a C sweep specifically.
+   matters for a C sweep specifically. This is the one remaining
+   unverified assumption — resolving it needs the actual pipeline code
+   that generated that baseline, not just its numeric output.
 
 3. BINARY THRESHOLD for the per-fold sensitivity/specificity/ppv/accuracy
    columns is fixed at 0.5 on the CALIBRATED probability — matching
@@ -242,32 +244,53 @@ def run_one_config(X, y, age, site, rotate_i0002, penalty, C, l1_ratio,
     return results_rows, coef_rows, pooled_df
 
 
-def threshold_sweep(pooled_df, thresholds, prevalence_df=None):
+def threshold_sweep(pooled_df, thresholds, prevalence_ages=None, prevalence_labels=None):
     """
     Pooled reward/AUROC threshold sweep, matching your existing
     loso_threshold_sweep.csv columns (threshold, reward, auroc).
-    prevalence_df, if given, must have 'age' and 'label' columns and is used
-    as the reference population for compute_prevalence; otherwise the pooled
-    test set is used as its own reference (see module docstring, assumption #1).
+
+    CONFIRMED 2026-07-09 against two real runs (2-site logreg + 3-site
+    I0002-rotation logreg, same underlying data): the prevalence reference
+    for compute_prevalence is the FULL available labeled population —
+    ALL sites, INCLUDING whichever site wasn't held out / scored in a given
+    run. Verified by exact reproduction on every tested threshold: scoring
+    the 2-site (6281-patient) pool using only itself as the prevalence
+    reference gave numbers 20-40% too high; scoring it using the full
+    3-site (6600-patient) pool as the reference reproduced the real
+    reported reward EXACTLY at every threshold tested. This makes sense as
+    a design choice — local age-prevalence should reflect the true
+    population base rate from every available label, not just whichever
+    patients happen to be in a particular fold's test set.
+
+    prevalence_ages/prevalence_labels: pass the FULL dataset's age/label
+    arrays (not just the pooled test predictions) — i.e. every patient in
+    your --features-cache, train and test folds combined, regardless of
+    rotation scheme. If omitted, falls back to the pooled test set as its
+    own reference (NOT recommended — this was the old, disproven default;
+    kept only so the function still runs standalone without a full dataset
+    handy, e.g. for quick synthetic smoke tests).
+
+    The 'auroc' column is pooled age-conditioned AUROC over the combined
+    scored population (gap=2) — confirmed exact match separately, see
+    compute_auroc_age_with_pairs usage below.
     """
     labels = pooled_df['label'].to_numpy()
     ages = pooled_df['age'].to_numpy(dtype=float)
     probs = pooled_df['probability'].to_numpy()
 
-    if prevalence_df is not None:
-        prevalence_labels = prevalence_df['label'].to_numpy()
-        prevalence_ages = prevalence_df['age'].to_numpy(dtype=float)
+    if prevalence_ages is not None and prevalence_labels is not None:
+        ref_ages, ref_labels = prevalence_ages, prevalence_labels
     else:
-        prevalence_labels, prevalence_ages = labels, ages
+        ref_ages, ref_labels = ages, labels
 
-    age_to_prevalence = compute_prevalence(ages, prevalence_labels, prevalence_ages, gap=2)
-    std_auroc = _compute_auroc(labels, probs)
+    age_to_prevalence = compute_prevalence(ages, ref_labels, ref_ages, gap=2)
+    pooled_age_cond_auroc, _ = compute_auroc_age_with_pairs(labels, probs, ages, gap=2)
 
     rows = []
     for t in thresholds:
         preds = (probs > t).astype(int)
         reward = compute_reward(labels, preds, ages, age_to_prevalence)
-        rows.append({'threshold': t, 'reward': round(reward, 4), 'auroc': round(std_auroc, 4)})
+        rows.append({'threshold': t, 'reward': round(reward, 4), 'auroc': round(pooled_age_cond_auroc, 4)})
     return pd.DataFrame(rows)
 
 
@@ -289,10 +312,6 @@ def main():
                          help='Binary decision threshold for per-fold sens/spec/ppv/accuracy columns.')
     parser.add_argument('--reward-thresholds', default='0.05,0.08,0.10,0.12,0.15,0.20',
                          help='Thresholds swept for the pooled reward table.')
-    parser.add_argument('--prevalence-file', default=None,
-                         help='Optional CSV with age,label columns to use as the reward prevalence '
-                              'reference. If omitted, the pooled test set is self-referential — see '
-                              'module docstring assumption #1 before comparing reward to existing baselines.')
     parser.add_argument('--no-calibration', action='store_true',
                          help='Skip CalibratedClassifierCV wrapping (faster, for quick screening).')
     parser.add_argument('--output-dir', required=True)
@@ -324,7 +343,6 @@ def main():
               f"Narrow your grid or pass --force if this is intentional.", file=sys.stderr)
         sys.exit(2)
 
-    prevalence_df = pd.read_csv(args.prevalence_file) if args.prevalence_file else None
     reward_thresholds = [float(t) for t in args.reward_thresholds.split(',')]
 
     output_dir = Path(args.output_dir)
@@ -346,7 +364,8 @@ def main():
 
         pd.DataFrame(coef_rows).to_csv(config_dir / 'coefficients.csv', index=False)
 
-        sweep_df = threshold_sweep(pooled_df, reward_thresholds, prevalence_df=prevalence_df)
+        sweep_df = threshold_sweep(pooled_df, reward_thresholds,
+                                    prevalence_ages=age, prevalence_labels=y)
         sweep_df.to_csv(config_dir / 'loso_threshold_sweep.csv', index=False)
 
         mean_auroc = results_df['age_cond_auroc'].mean()

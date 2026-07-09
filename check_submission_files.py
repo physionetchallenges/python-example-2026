@@ -96,17 +96,14 @@ STDLIB_SKIP = {
 }
 
 
-def parse_team_code_imports(team_code_path: Path):
+def _parse_imports(source: str, filename: str):
     """
-    Parses team_code.py's AST for import statements. Returns:
-      feature_module_paths: set of relative file paths under features/
-        that must exist (derived from `from features.X import ...` and
-        `from features import ...`)
-      third_party_packages: set of top-level third-party import names
-      dev_only_imports: set of dev-only module names imported (should be empty)
+    Parses one file's AST for import statements. Returns
+    (feature_module_paths, third_party_packages, dev_only_imports) — kept
+    as a standalone function so it can be called once per file during
+    transitive BFS resolution below.
     """
-    source = team_code_path.read_text()
-    tree = ast.parse(source, filename=str(team_code_path))
+    tree = ast.parse(source, filename=filename)
 
     feature_module_paths = set()
     third_party_packages = set()
@@ -118,10 +115,8 @@ def parse_team_code_imports(team_code_path: Path):
             top_level = module.split(".")[0]
 
             if module == "features":
-                # from features import X, Y  -> needs features/__init__.py
                 feature_module_paths.add("features/__init__.py")
             elif module.startswith("features."):
-                # from features.demographic import X -> features/demographic.py
                 submodule = module.split(".", 1)[1]
                 feature_module_paths.add(f"features/{submodule}.py")
                 feature_module_paths.add("features/__init__.py")
@@ -139,6 +134,63 @@ def parse_team_code_imports(team_code_path: Path):
                     dev_only_imports.add(top_level)
                 elif top_level not in STDLIB_SKIP:
                     third_party_packages.add(top_level)
+
+    return feature_module_paths, third_party_packages, dev_only_imports
+
+
+def parse_team_code_imports(team_code_path: Path):
+    """
+    Parses team_code.py's imports, then TRANSITIVELY parses every
+    features/*.py file discovered that way for further `features.X`
+    imports, repeating until no new files are found (BFS). This closes a
+    real gap (found 2026-07-08, on a live merged repo): team_code.py
+    importing `features.pipeline`, which itself imports
+    `features.age_residuals`, was going COMPLETELY UNDETECTED as a required
+    file by a single-file-only parse — that version would PASS a submission
+    missing a real runtime dependency, only failing at Docker build/import
+    time instead of at this pre-commit check. (This is the same failure
+    mode this file's own header comment already claimed was fixed —
+    it wasn't, in the code that was actually shipping. Fixed for real now.)
+
+    Returns:
+      feature_module_paths: set of relative file paths under features/
+        that must exist, resolved transitively.
+      third_party_packages: set of top-level third-party import names,
+        collected from team_code.py AND every transitively-discovered
+        features/*.py file (a feature module can import a package
+        team_code.py itself never mentions — e.g. features/pipeline.py
+        importing sklearn.linear_model, which team_code.py doesn't).
+      dev_only_imports: set of dev-only module names imported anywhere in
+        the transitive closure (should be empty).
+    """
+    repo_root = team_code_path.parent
+    source = team_code_path.read_text()
+
+    feature_module_paths, third_party_packages, dev_only_imports = _parse_imports(
+        source, str(team_code_path))
+
+    parsed = set()
+    to_parse = set(feature_module_paths)
+    while to_parse:
+        rel_path = to_parse.pop()
+        if rel_path in parsed:
+            continue
+        parsed.add(rel_path)
+
+        full_path = repo_root / rel_path
+        if not full_path.exists():
+            continue  # reported as MISSING by the caller
+
+        sub_source = full_path.read_text()
+        sub_features, sub_third_party, sub_dev_only = _parse_imports(
+            sub_source, str(full_path))
+
+        third_party_packages |= sub_third_party
+        dev_only_imports |= sub_dev_only
+
+        newly_found = sub_features - feature_module_paths
+        feature_module_paths |= sub_features
+        to_parse |= newly_found
 
     return feature_module_paths, third_party_packages, dev_only_imports
 
