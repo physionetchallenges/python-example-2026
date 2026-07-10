@@ -2,13 +2,39 @@
 
 ## What's in this repository?
 
-This repository contains a simple example that illustrates how to format a Python entry for the [George B. Moody PhysioNet Challenge 2026](https://physionetchallenges.org/2026/). If you are participating in the 2026 Challenge, then we recommend using this repository as a template for your entry. You can remove some of the code, reuse other code, and add new code to create your entry. You do not need to use the models, features, and/or libraries in this example for your entry. We encourage a diversity of approaches to the Challenges.
+This repository contains a simple example that
+illustrates how to format a Python entry for the
+[George B. Moody PhysioNet Challenge
+2026](https://physionetchallenges.org/2026/). If you
+are participating in the 2026 Challenge, then we
+recommend using this repository as a template for your
+entry. You can remove some of the code, reuse other
+code, and add new code to create your entry. You do
+not need to use the models, features, and/or libraries
+in this example for your entry. We encourage a
+diversity of approaches to the Challenges.
 
-For this example, we implemented a random forest model with several simple features. (This simple example is **not** designed to perform well, so you should **not** use it as a baseline for your approach's performance.) You can try it by running the following commands on the Challenge training set. If you are using a relatively recent personal computer, then you should be able to run these commands from start to finish on a small subset (1000 records) of the training data in a few minutes or less.
+For this example, we implemented a random forest model
+with several simple features. (This simple example is
+**not** designed to perform well, so you should
+**not** use it as a baseline for your approach's
+performance.) You can try it by running the following
+commands on the Challenge training set. If you are
+using a relatively recent personal computer, then you
+should be able to run these commands from start to
+finish on a small subset (1000 records) of the
+training data in a few minutes or less.
 
 ## How do I run these scripts?
 
-First, you can download and create data for these scripts by following the [instructions](https://github.com/physionetchallenges/python-example-2026?tab=readme-ov-file#how-do-i-create-data-for-these-scripts) in the following section.
+First, you can download the large and small training sets, as well as a supplementary set containing
+examples from the validation and test sets,
+from their respective Kaggle pages:
+- Training set (small): [https://www.kaggle.com/datasets/physionet/physionetchallenge2026data](https://www.kaggle.com/datasets/physionet/physionetchallenge2026data)
+- Training set (large): [https://www.kaggle.com/datasets/physionet/physionetchallenge2026datalargeversion](https://www.kaggle.com/datasets/physionet/physionetchallenge2026datalargeversion)
+- Supplementary set: [https://www.kaggle.com/datasets/physionet/physionet2026datasupplementary](https://www.kaggle.com/datasets/physionet/physionet2026datasupplementary)
+For more information about the data,
+please see the [data section on the PhysioNet Challenge website](https://moody-challenge.physionet.org/2026/#data).
 
 Second, you can install the dependencies for these scripts by creating a Docker image (see below) or [virtual environment](https://docs.python.org/3/library/venv.html) and running
 
@@ -35,7 +61,8 @@ where
 
 The [Challenge website](https://physionetchallenges.org/2026/#data) provides a training database with a description of the contents and structure of the data files.
 
-You can evaluate your model by pulling or downloading the [evaluation code](https://github.com/physionetchallenges/evaluation-2026) and running
+The scoring code is included in this repository
+in the file `evaluate_model.py`. You can evaluate your model by running
 
     python evaluate_model.py -d holdout_labels -o holdout_outputs -p prevalence_labels -s scores.csv
 
@@ -47,10 +74,6 @@ where
 - `scores.tsv` (output; optional) is file with a collection of scores for your model.
 
 You can use the provided training set for the `training_data` and `holdout_data` files, but we will use different datasets for the validation and test sets, and we will not provide the labels to your code.
-
-## How do I create data for these scripts?
-
-Please see the [data](https://physionetchallenges.org/2026/#data) section of the website for more information about the Challenge data.
 
 ## Which scripts I can edit?
 
@@ -66,13 +89,10 @@ Please do **not** edit the following scripts. We will use the unedited versions 
 
 These scripts must remain in the root path of your repository, but you can put other scripts and other files elsewhere in your repository.
 
-## How do I train, save, load, and run my model?
+## How will the code be run when it's submitted?
 
-To train and save your model, please edit the `train_model` function in the `team_code.py` script. Please do not edit the input or output arguments of this function.
-
-To load and run your trained model, please edit the `load_model` and `run_model` functions in the `team_code.py` script. Please do not edit the input or output arguments of these functions.
-
-## How do I run these scripts in Docker?
+We package your code into a Docker image
+and run it as a container.
 
 Docker and similar platforms allow you to containerize and package your code with specific dependencies so that your code can be reliably run in other computational environments.
 
@@ -124,10 +144,6 @@ If you have trouble running your code, then please try the follow steps to run t
         root@[...]:/challenge# exit
         Exit
 
-## What else do I need?
-
-Please see the [evaluation code repository](https://github.com/physionetchallenges/evaluation-2026) for code and instructions for evaluating your entry using the Challenge scoring metric.
-
 ## How do I learn more? How do I share more?
 
 Please see the [Challenge website](https://physionetchallenges.org/2026/) for more details. Please post questions and concerns on the [Challenge discussion forum](https://groups.google.com/forum/#!forum/physionet-challenges). Please do not make pull requests, which may share information about your approach.
@@ -136,6 +152,5 @@ Please see the [Challenge website](https://physionetchallenges.org/2026/) for mo
 
 * [Challenge website](https://physionetchallenges.org/2026/)
 * [MATLAB example code](https://github.com/physionetchallenges/matlab-example-2026)
-* [Evaluation code](https://github.com/physionetchallenges/evaluation-2026)
 * [Frequently asked questions (FAQ) for this year's Challenge](https://physionetchallenges.org/2026/faq/)
 * [Frequently asked questions (FAQ) about the Challenges in general](https://physionetchallenges.org/faq/)
