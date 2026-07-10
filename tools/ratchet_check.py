@@ -1,394 +1,376 @@
 #!/usr/bin/env python
 
 """
-reg_sweep.py
+ratchet_check.py
 Team Narnia — PhysioNet Challenge 2026
 
-Ridge / Lasso / ElasticNet regularization sweep for the logreg model family,
-plus a per-fold coefficient-stability check (does the same feature keep a
-similar sign/magnitude across LOSO folds, or is the additive signal
-fold-specific?).
+Answers one question before you submit: "is this LOSO result actually worse
+than what we've already confirmed, or is it inside the noise band we already
+characterized?" Motivated directly by the Entry 1-3 leaderboard sequence
+(0.624 -> 0.616 -> 0.606), which LOOKED like a monotonic decline but was
+confirmed via Hanley-McNeil SE to be ~0.12-0.40 sigma per step — i.e. noise,
+not regression. This script automates that same check instead of re-deriving
+it by hand every time.
 
-Built standalone rather than bolted onto loso_cv.py, because that file's
-current CLI surface (hyperparameter flags, single-fold-only mode) wasn't
-available to build against. This script:
-  - Uses evaluate_model.py's ACTUAL compute_auroc_age / compute_reward /
-    compute_prevalence functions directly (imported, not reimplemented) —
-    metric fidelity to the official scorer is guaranteed by construction.
-  - Writes loso_results.csv / loso_threshold_sweep.csv in the EXACT column
-    schema confirmed against a real loso_cv.py output (2026-07-08, CatBoost
-    run) — drops straight into ratchet_check.py with zero changes.
-  - Implements its own LOSO fold splitting (2-site or 3-site via
-    --rotate-i0002) rather than assuming loso_cv.py exposes this the same way.
+One-directional ratchet: only ever fails on a REGRESSION beyond the sigma
+threshold. An improvement of any size always passes — this is a gate against
+backsliding, not a two-sided significance test.
 
-IMPORTANT — resolved and open items as of 2026-07-09:
+Baselines live in ratchet_baselines.json, hand-curated (see that file's
+_readme). This script never writes to it — promoting a new result to a
+baseline is a deliberate decision, not something a script should do for you.
 
-1. REWARD PREVALENCE REFERENCE: CONFIRMED (see threshold_sweep() docstring)
-   — the full labeled population across all sites, regardless of rotation.
-   Handled automatically by main() below.
+Usage (standalone):
+    python ratchet_check.py --loso-results loso_results.csv --baseline small_entry3
 
-2. SCALING: CONFIRMED via the real features/pipeline.py (uploaded
-   2026-07-09, not a reconstruction) — build_logreg_pipeline() does
-   include StandardScaler after the imputer, exactly as this script
-   assumed. No longer a caveat.
+    # If your loso_results.csv uses different column names than the
+    # defaults below, point at them explicitly:
+    python ratchet_check.py --loso-results loso_results.csv --baseline small_entry3 \\
+        --auroc-col age_cond_auroc --n-pos-col n_pos_test --n-neg-col n_neg_test
 
-3. NEW SCOPE NOTE: the real build_logreg_pipeline()'s LOGREG_PARAMS
-   hardcodes penalty='l2' — L1 and ElasticNet were NEVER tried before this
-   sweep. This isn't refining an existing result, it's testing genuinely
-   new territory. Confirmed real defaults: C=0.01 (not 1.0), max_iter=2000
-   (not 5000), default solver='lbfgs' for the l2 path (only switches to
-   'saga' when a non-l2 penalty is requested). This script's defaults now
-   match those exactly — an unparameterized l2 run reproduces the original
-   tested config byte-for-byte.
-
-3. BINARY THRESHOLD for the per-fold sensitivity/specificity/ppv/accuracy
-   columns is fixed at 0.5 on the CALIBRATED probability — matching
-   evaluate_model.py's own binary_predictions convention. The
-   reward-optimal threshold is chosen separately via the pooled threshold
-   sweep (loso_threshold_sweep.csv), same two-stage structure as your
-   existing Entry 3 THRESHOLD convention.
-
-Usage:
-    python reg_sweep.py --features-cache small_features.npz \\
-        --penalties l2,l1,elasticnet --C 0.01,0.1,1,10 --l1-ratios 0.3,0.5,0.7 \\
-        --output-dir outputs/reg_sweep_small
-
-    python reg_sweep.py --features-cache large_features.npz --rotate-i0002 \\
-        --penalties l2 --C 0.1,1 --output-dir outputs/reg_sweep_large_top2
-
-Expected --features-cache format: a .npz file with arrays:
-    X    — (n_patients, 48) float, PRE-AgeResidualizer feature vector
-           (same 48-length hstack team_code.py/loso_cv.py produce)
-    y    — (n_patients,) int/bool, Cognitive_Impairment label
-    site — (n_patients,) str, SiteID (e.g. 'S0001', 'I0006', 'I0002')
-    age  — (n_patients,) float, Age
-
-This is NOT the same as any file already in your repo — you'll need to
-build/cache this once from your existing extraction step. If you already
-have loso_probabilities.csv-style per-patient data with features attached,
-adapt build_dataset_npz() below instead of re-extracting from EDFs.
+Also importable — see check_ratchet() for use from check_submission_files.py.
 """
 
 import argparse
-import ast
-import itertools
+import json
 import os
 import sys
 from pathlib import Path
 
+_DEFAULT_BASELINES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ratchet_baselines.json')
+
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from features import FEATURE_NAMES_48, FEATURE_NAMES_50
-from features.pipeline import build_logreg_pipeline, extract_fitted_coefficients
-from evaluate_model import compute_prevalence, compute_reward, compute_auroc as _compute_auroc
-
-# ── Fold definitions ─────────────────────────────────────────────────────────
-ALWAYS_TRAIN_SITE = 'I0002'  # only relevant when --rotate-i0002 is NOT passed
-TWO_SITE_ROTATION = ['I0006', 'S0001']
-THREE_SITE_ROTATION = ['I0006', 'S0001', 'I0002']
-
-REQUIRED_LOSO_RESULTS_COLUMNS = [
-    'fold', 'holdout_site', 'n_train', 'n_pos_train', 'n_neg_train',
-    'n_test', 'n_pos_test', 'n_neg_test', 'age_cond_auroc', 'n_age_pairs',
-    'std_auroc', 'accuracy', 'sensitivity', 'specificity', 'ppv',
-    'TP', 'FP', 'FN', 'TN', 'top5_features',
-]
+# Confirmed against a real loso_results.csv (2026-07-08, CatBoost run):
+# columns are fold, holdout_site, n_train, n_pos_train, n_neg_train, n_test,
+# n_pos_test, n_neg_test, age_cond_auroc, n_age_pairs, std_auroc, accuracy,
+# sensitivity, specificity, ppv, TP, FP, FN, TN, top5_features. Candidates
+# below are ordered with the confirmed real names first; older/alternate
+# names kept as fallbacks in case a different loso_cv.py revision is used.
+_AUROC_COL_CANDIDATES = ['age_cond_auroc', 'age_conditioned_auroc', 'auroc_age', 'auroc']
+_N_POS_COL_CANDIDATES = ['n_pos_test', 'n_pos', 'num_pos', 'n_positive']
+_N_NEG_COL_CANDIDATES = ['n_neg_test', 'n_neg', 'num_neg', 'n_negative']
+_SITE_COL_CANDIDATES = ['holdout_site', 'fold', 'site']
 
 
-def compute_auroc_age_with_pairs(labels, predictions, ages, gap=0):
+def _resolve_column(df, candidates, explicit, quantity_name):
+    if explicit is not None:
+        if explicit not in df.columns:
+            raise ValueError(
+                f"--{quantity_name}-col '{explicit}' not found in loso_results.csv. "
+                f"Actual columns: {list(df.columns)}")
+        return explicit
+    for cand in candidates:
+        if cand in df.columns:
+            return cand
+    raise ValueError(
+        f"Could not find a column for '{quantity_name}' in loso_results.csv. "
+        f"Tried: {candidates}. Actual columns: {list(df.columns)}. "
+        f"Pass --{quantity_name}-col explicitly to point at the right one.")
+
+
+def hanley_mcneil_se(auroc, n_pos, n_neg):
     """
-    Mirrors evaluate_model.py's compute_auroc_age EXACTLY (same loop, same
-    tie-handling) but also returns the pair count (denom), matching
-    loso_results.csv's n_age_pairs column. Do not let this drift from
-    evaluate_model.py's own logic — it's a read-only duplicate purely to
-    expose one more number for logging, never edit evaluate_model.py itself.
+    Standard error of an AUROC estimate (Hanley & McNeil, 1982).
+    Same formula already used by hand in learning_log.md's 2026-07-01
+    entry to confirm the Entry 1-3 leaderboard decline was noise.
     """
-    labels = np.asarray(labels)
-    predictions = np.asarray(predictions)
-    ages = np.asarray(ages, dtype=float)
+    if n_pos <= 1 or n_neg <= 1:
+        raise ValueError(
+            f"Need n_pos > 1 and n_neg > 1 for a Hanley-McNeil SE "
+            f"(got n_pos={n_pos}, n_neg={n_neg}).")
 
-    idx_pos = np.where(labels == 1)[0]
-    idx_neg = np.where(labels == 0)[0]
+    q1 = auroc / (2 - auroc)
+    q2 = (2 * auroc ** 2) / (1 + auroc)
 
-    numer = 0.0
-    denom = 0
-    for i in idx_pos:
-        for j in idx_neg:
-            if abs(ages[i] - ages[j]) <= gap:
-                if predictions[i] > predictions[j]:
-                    numer += 1
-                elif predictions[i] == predictions[j]:
-                    numer += 0.5
-                denom += 1
-    auroc = numer / denom if denom > 0 else float('nan')
-    return auroc, denom
+    variance = (
+        auroc * (1 - auroc)
+        + (n_pos - 1) * (q1 - auroc ** 2)
+        + (n_neg - 1) * (q2 - auroc ** 2)
+    ) / (n_pos * n_neg)
+
+    return float(np.sqrt(max(variance, 0.0)))
 
 
-def load_feature_cache(path):
+def se_of_fold_mean(fold_aurocs_n_pos_n_neg):
+    """
+    SE of a SIMPLE (unweighted) mean of per-fold AUROCs — matching
+    loso_cv.py's own "Mean age-conditioned AUROC" convention (confirmed
+    2026-07-08 against a real loso_summary.txt: it's a plain average
+    across folds, e.g. (0.5493+0.5393)/2 = 0.5443 for the 2-fold I0006/S0001
+    LOSO setup — NOT weighted by each fold's test-set size).
+
+    For n independent fold estimates, Var(mean) = (1/n^2) * sum(Var_i), so
+    SE(mean) = sqrt(sum(SE_i^2)) / n. This is standard for an average of
+    independent estimates and differs from a single Hanley-McNeil SE
+    computed on pooled/summed n_pos+n_neg, which would implicitly (and
+    wrongly here) assume one AUROC was computed over the full pooled
+    sample rather than averaged from per-site folds.
+    """
+    n = len(fold_aurocs_n_pos_n_neg)
+    if n == 0:
+        raise ValueError("Need at least one fold to compute a mean SE.")
+    variance_sum = sum(
+        hanley_mcneil_se(auroc, n_pos, n_neg) ** 2
+        for auroc, n_pos, n_neg in fold_aurocs_n_pos_n_neg
+    )
+    return float(np.sqrt(variance_sum) / n)
+
+
+def compare_auroc(candidate_folds, baseline_folds, sigma_threshold=1.0):
+    """
+    Compares a candidate's mean age-conditioned AUROC against a baseline's,
+    where "mean" means the same simple per-fold average loso_cv.py itself
+    reports (see se_of_fold_mean). Each *_folds argument is a list of
+    (auroc, n_pos, n_neg) tuples, one per LOSO holdout fold.
+
+    One-directional ratchet: only fails on a regression beyond
+    sigma_threshold pooled SEs. An improving candidate always passes.
+    """
+    candidate_auroc = float(np.mean([f[0] for f in candidate_folds]))
+    baseline_auroc = float(np.mean([f[0] for f in baseline_folds]))
+
+    se_candidate = se_of_fold_mean(candidate_folds)
+    se_baseline = se_of_fold_mean(baseline_folds)
+    se_diff = float(np.sqrt(se_candidate ** 2 + se_baseline ** 2))
+
+    delta = candidate_auroc - baseline_auroc
+    sigmas = delta / se_diff if se_diff > 0 else float('inf')
+
+    if delta >= 0:
+        verdict = 'PASS (improvement)'
+        is_regression = False
+    elif sigmas >= -sigma_threshold:
+        verdict = 'PASS (within noise band)'
+        is_regression = False
+    else:
+        verdict = 'FAIL (regression exceeds noise band)'
+        is_regression = True
+
+    return {
+        'metric': 'age_cond_auroc',
+        'candidate': candidate_auroc,
+        'baseline': baseline_auroc,
+        'delta': delta,
+        'se_diff': se_diff,
+        'sigmas': sigmas,
+        'sigma_threshold': sigma_threshold,
+        'verdict': verdict,
+        'is_regression': is_regression,
+    }
+
+
+def compare_reward(candidate_reward, baseline, max_pct_drop=0.15):
+    """
+    Reward has no clean analytic SE — it's a prevalence-weighted score per
+    patient (compute_reward in evaluate_model.py), not a simple binomial
+    rate, so Hanley-McNeil doesn't apply. This is a blunt percentage-drop
+    heuristic, explicitly informational rather than a rigorous statistical
+    gate. A proper version would bootstrap over loso_probabilities.csv
+    (resample patients with replacement, recompute reward each time) — not
+    implemented here; flag if you want that added.
+    """
+    baseline_reward = baseline['reward']
+    if baseline_reward == 0:
+        pct_drop = float('inf') if candidate_reward < 0 else 0.0
+    else:
+        pct_drop = (baseline_reward - candidate_reward) / abs(baseline_reward)
+
+    if candidate_reward >= baseline_reward:
+        verdict = 'PASS (improvement)'
+        is_regression = False
+    elif pct_drop <= max_pct_drop:
+        verdict = 'PASS (within tolerance, NOT statistically rigorous)'
+        is_regression = False
+    else:
+        verdict = 'WARN (drop exceeds tolerance, NOT statistically rigorous)'
+        is_regression = True
+
+    return {
+        'metric': 'reward',
+        'candidate': candidate_reward,
+        'baseline': baseline_reward,
+        'pct_drop': pct_drop,
+        'max_pct_drop': max_pct_drop,
+        'verdict': verdict,
+        'is_regression': is_regression,
+        'note': 'Percentage-drop heuristic only — reward has no analytic SE. '
+                'Not as rigorous as the AUROC check.',
+    }
+
+
+def load_baselines(path=_DEFAULT_BASELINES_PATH):
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Feature cache not found: {path}")
-    data = np.load(path, allow_pickle=True)
-    for key in ('X', 'y', 'site', 'age'):
-        if key not in data:
-            raise ValueError(
-                f"'{key}' missing from {path}. Found keys: {list(data.keys())}. "
-                f"See this script's module docstring for the expected format.")
-    X = np.asarray(data['X'], dtype=float)
-    y = np.asarray(data['y']).astype(int)
-    site = np.asarray(data['site']).astype(str)
-    age = np.asarray(data['age'], dtype=float)
-    if X.shape[1] != len(FEATURE_NAMES_48):
+        raise FileNotFoundError(
+            f"Baseline file not found: {path}. Run from the repo root, or "
+            f"pass --baselines-file to point at it explicitly.")
+    with open(path) as f:
+        data = json.load(f)
+    data.pop('_readme', None)
+    return data
+
+
+def summarize_loso_results(csv_path, auroc_col=None, n_pos_col=None, n_neg_col=None,
+                            site_col=None):
+    """
+    Parses per-fold LOSO results into the (auroc, n_pos, n_neg) tuple list
+    compare_auroc() needs. Does NOT collapse to a single pooled number here
+    — the simple-mean-of-folds convention (matching loso_cv.py's own
+    "Mean age-conditioned AUROC" line) is applied by the caller via
+    compare_auroc(), so this function stays a pure, honest parse of the CSV.
+    """
+    df = pd.read_csv(csv_path)
+
+    auroc_col = _resolve_column(df, _AUROC_COL_CANDIDATES, auroc_col, 'auroc')
+    n_pos_col = _resolve_column(df, _N_POS_COL_CANDIDATES, n_pos_col, 'n-pos')
+    n_neg_col = _resolve_column(df, _N_NEG_COL_CANDIDATES, n_neg_col, 'n-neg')
+    try:
+        site_col = _resolve_column(df, _SITE_COL_CANDIDATES, site_col, 'site')
+        sites = df[site_col].astype(str).tolist()
+    except ValueError:
+        sites = [f'fold_{i}' for i in range(len(df))]  # site label is cosmetic only
+
+    folds = list(zip(df[auroc_col].astype(float), df[n_pos_col].astype(int),
+                      df[n_neg_col].astype(int)))
+    return folds, sites
+
+
+def _folds_from_baseline(baseline):
+    """Builds the (auroc, n_pos, n_neg) tuple list from a baseline dict's
+    'folds' list. Raises a clear error if the baseline predates this schema
+    (i.e. still uses the old pooled n_pos/n_neg format)."""
+    if 'folds' not in baseline:
         raise ValueError(
-            f"X has {X.shape[1]} columns, expected {len(FEATURE_NAMES_48)} "
-            f"(the pre-AgeResidualizer 48-length vector). Check your cache "
-            f"was built from the same extraction order as team_code.py.")
-    n = len(y)
-    if not (len(site) == len(age) == n == X.shape[0]):
-        raise ValueError(
-            f"Mismatched lengths: X={X.shape[0]}, y={n}, site={len(site)}, age={len(age)}")
-    return X, y, site, age
+            "This baseline uses the old pooled-total schema (n_pos/n_neg at "
+            "the top level) and can't be used with the corrected per-fold SE "
+            "calculation. Update ratchet_baselines.json to include a 'folds' "
+            "list: [{'site':..., 'age_cond_auroc':..., 'n_pos':..., 'n_neg':...}, ...]")
+    return [(f['age_cond_auroc'], f['n_pos'], f['n_neg']) for f in baseline['folds']]
 
 
-def make_folds(site, rotate_i0002):
-    """Yields (holdout_site, train_idx, test_idx). I0002 is excluded from
-    the rotation (always in training) unless --rotate-i0002 is passed —
-    same logic/justification as loso_cv.py's own KNOWN_MISLABELED_PATIENT_IDS-
-    adjacent fold setup (learning_log.md, 2026-07-05: I0002 no longer
-    justified as a permanent-training-only site at large scale)."""
-    holdout_sites = THREE_SITE_ROTATION if rotate_i0002 else TWO_SITE_ROTATION
-    for holdout in holdout_sites:
-        test_idx = np.where(site == holdout)[0]
-        train_idx = np.where(site != holdout)[0]
-        if len(test_idx) == 0:
-            raise ValueError(f"No patients found for holdout site '{holdout}' — check site labels.")
-        yield holdout, train_idx, test_idx
-
-
-def _binary_metrics(y_true, probs, threshold=0.5):
-    pred = (probs > threshold).astype(int)
-    tp = int(np.sum((y_true == 1) & (pred == 1)))
-    fp = int(np.sum((y_true == 0) & (pred == 1)))
-    fn = int(np.sum((y_true == 1) & (pred == 0)))
-    tn = int(np.sum((y_true == 0) & (pred == 0)))
-    accuracy = (tp + tn) / max(tp + fp + fn + tn, 1)
-    sensitivity = tp / max(tp + fn, 1)
-    specificity = tn / max(tn + fp, 1)
-    ppv = tp / max(tp + fp, 1)
-    return dict(TP=tp, FP=fp, FN=fn, TN=tn, accuracy=accuracy,
-                sensitivity=sensitivity, specificity=specificity, ppv=ppv)
-
-
-def run_one_config(X, y, age, site, rotate_i0002, penalty, C, l1_ratio,
-                    calibrated=True, threshold=0.5, config_label=None):
+def check_ratchet(loso_results_csv, baseline_key, baselines_file=_DEFAULT_BASELINES_PATH,
+                   candidate_reward=None, sigma_threshold=1.0, max_reward_pct_drop=0.15,
+                   auroc_col=None, n_pos_col=None, n_neg_col=None, site_col=None):
     """
-    Runs one LOSO cycle for one (penalty, C, l1_ratio) config.
-    Returns (results_rows, coef_rows, pooled_df) where pooled_df has one row
-    per patient across ALL test folds (site, age, label, probability) — used
-    both for the reward threshold sweep and as this config's own prevalence
-    reference (see module docstring, assumption #1).
+    Main entry point — also called from check_submission_files.py.
+    Returns (passed: bool, results: list[dict], messages: list[str]).
     """
-    results_rows = []
-    coef_rows = []
-    pooled_records = []
+    messages = []
+    baselines = load_baselines(baselines_file)
 
-    for fold_i, (holdout, train_idx, test_idx) in enumerate(make_folds(site, rotate_i0002)):
-        X_train, y_train = X[train_idx], y[train_idx]
-        X_test, y_test, age_test = X[test_idx], y[test_idx], age[test_idx]
+    if baseline_key not in baselines:
+        raise KeyError(
+            f"Baseline key '{baseline_key}' not found in {baselines_file}. "
+            f"Available: {list(baselines.keys())}")
 
-        pipeline = build_logreg_pipeline(
-            y_train, calibrated=calibrated, C=C, penalty=penalty, l1_ratio=l1_ratio)
-        pipeline.fit(X_train, y_train)
+    baseline = baselines[baseline_key]
+    baseline_folds = _folds_from_baseline(baseline)
 
-        probs = pipeline.predict_proba(X_test)[:, 1]
+    if not baseline.get('leaderboard_confirmed', False):
+        messages.append(
+            f"CAUTION: baseline '{baseline_key}' is LOSO-only — it has never been "
+            f"submitted to the real leaderboard (leaderboard_confirmed=false). "
+            f"A PASS here means 'not worse than your best LOSO estimate so far', "
+            f"NOT 'confirmed to perform on the real leaderboard'. Your only two "
+            f"known LOSO->leaderboard deltas (both at small scale) had DIFFERENT "
+            f"signs of surprise (+0.125, then +0.076) — do not assume this offset "
+            f"transfers to large scale, where you have zero leaderboard data points "
+            f"so far."
+        )
 
-        age_cond_auroc, n_age_pairs = compute_auroc_age_with_pairs(y_test, probs, age_test, gap=2)
-        std_auroc = _compute_auroc(y_test, probs)
-        bm = _binary_metrics(y_test, probs, threshold=threshold)
+    candidate_folds, candidate_sites = summarize_loso_results(
+        loso_results_csv, auroc_col, n_pos_col, n_neg_col, site_col)
 
-        coefs = extract_fitted_coefficients(pipeline)
-        top5_idx = np.argsort(-np.abs(coefs))[:5]
-        top5 = [(FEATURE_NAMES_50[i], round(float(coefs[i]), 4)) for i in top5_idx]
+    if len(candidate_folds) != len(baseline_folds):
+        messages.append(
+            f"candidate has {len(candidate_folds)} fold(s), baseline has "
+            f"{len(baseline_folds)} — simple-mean comparison still works but isn't "
+            f"apples-to-apples if these represent different LOSO rotations "
+            f"(e.g. 2-site vs 3-site with I0002 included).")
 
-        results_rows.append({
-            'fold': f'holdout_{holdout}',
-            'holdout_site': holdout,
-            'n_train': len(train_idx),
-            'n_pos_train': int(y_train.sum()),
-            'n_neg_train': int((~y_train.astype(bool)).sum()),
-            'n_test': len(test_idx),
-            'n_pos_test': int(y_test.sum()),
-            'n_neg_test': int((~y_test.astype(bool)).sum()),
-            'age_cond_auroc': round(age_cond_auroc, 4),
-            'n_age_pairs': n_age_pairs,
-            'std_auroc': round(std_auroc, 4),
-            'accuracy': round(bm['accuracy'], 4),
-            'sensitivity': round(bm['sensitivity'], 4),
-            'specificity': round(bm['specificity'], 4),
-            'ppv': round(bm['ppv'], 4),
-            'TP': bm['TP'], 'FP': bm['FP'], 'FN': bm['FN'], 'TN': bm['TN'],
-            'top5_features': str(top5),
-        })
+    auroc_result = compare_auroc(candidate_folds, baseline_folds, sigma_threshold=sigma_threshold)
+    auroc_result['candidate_sites'] = candidate_sites
+    results = [auroc_result]
 
-        for feat_name, coef_val in zip(FEATURE_NAMES_50, coefs):
-            coef_rows.append({'fold': f'holdout_{holdout}', 'feature': feat_name,
-                               'coefficient': float(coef_val)})
-
-        for i, p in zip(test_idx, probs):
-            pooled_records.append({'site': site[i], 'age': age[i], 'label': y[i], 'probability': p})
-
-    pooled_df = pd.DataFrame(pooled_records)
-    return results_rows, coef_rows, pooled_df
-
-
-def threshold_sweep(pooled_df, thresholds, prevalence_ages=None, prevalence_labels=None):
-    """
-    Pooled reward/AUROC threshold sweep, matching your existing
-    loso_threshold_sweep.csv columns (threshold, reward, auroc).
-
-    CONFIRMED 2026-07-09 against two real runs (2-site logreg + 3-site
-    I0002-rotation logreg, same underlying data): the prevalence reference
-    for compute_prevalence is the FULL available labeled population —
-    ALL sites, INCLUDING whichever site wasn't held out / scored in a given
-    run. Verified by exact reproduction on every tested threshold: scoring
-    the 2-site (6281-patient) pool using only itself as the prevalence
-    reference gave numbers 20-40% too high; scoring it using the full
-    3-site (6600-patient) pool as the reference reproduced the real
-    reported reward EXACTLY at every threshold tested. This makes sense as
-    a design choice — local age-prevalence should reflect the true
-    population base rate from every available label, not just whichever
-    patients happen to be in a particular fold's test set.
-
-    prevalence_ages/prevalence_labels: pass the FULL dataset's age/label
-    arrays (not just the pooled test predictions) — i.e. every patient in
-    your --features-cache, train and test folds combined, regardless of
-    rotation scheme. If omitted, falls back to the pooled test set as its
-    own reference (NOT recommended — this was the old, disproven default;
-    kept only so the function still runs standalone without a full dataset
-    handy, e.g. for quick synthetic smoke tests).
-
-    The 'auroc' column is pooled age-conditioned AUROC over the combined
-    scored population (gap=2) — confirmed exact match separately, see
-    compute_auroc_age_with_pairs usage below.
-    """
-    labels = pooled_df['label'].to_numpy()
-    ages = pooled_df['age'].to_numpy(dtype=float)
-    probs = pooled_df['probability'].to_numpy()
-
-    if prevalence_ages is not None and prevalence_labels is not None:
-        ref_ages, ref_labels = prevalence_ages, prevalence_labels
+    if candidate_reward is not None:
+        results.append(compare_reward(
+            candidate_reward, baseline, max_pct_drop=max_reward_pct_drop))
     else:
-        ref_ages, ref_labels = ages, labels
+        messages.append(
+            "No --candidate-reward passed — reward ratchet check skipped. "
+            "AUROC-only gate is NOT a full picture; pass reward explicitly "
+            "once you have a pooled threshold sweep result.")
 
-    age_to_prevalence = compute_prevalence(ages, ref_labels, ref_ages, gap=2)
-    pooled_age_cond_auroc, _ = compute_auroc_age_with_pairs(labels, probs, ages, gap=2)
-
-    rows = []
-    for t in thresholds:
-        preds = (probs > t).astype(int)
-        reward = compute_reward(labels, preds, ages, age_to_prevalence)
-        rows.append({'threshold': t, 'reward': round(reward, 4), 'auroc': round(pooled_age_cond_auroc, 4)})
-    return pd.DataFrame(rows)
+    passed = not any(r['is_regression'] for r in results)
+    return passed, results, messages
 
 
-def config_dirname(penalty, C, l1_ratio):
-    if penalty == 'elasticnet':
-        return f'logreg_elasticnet_C{C}_l1r{l1_ratio}'
-    return f'logreg_{penalty}_C{C}'
+def _print_report(baseline_key, results, messages):
+    print(f"Ratchet check against baseline: {baseline_key}\n")
 
+    cautions = [m for m in messages if m.startswith('CAUTION')]
+    other_messages = [m for m in messages if not m.startswith('CAUTION')]
+    for c in cautions:
+        print(f"!! {c}\n")
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--features-cache', required=True)
-    parser.add_argument('--rotate-i0002', action='store_true',
-                         help='Use 3-site LOSO rotation (I0006, S0001, I0002) instead of the default 2-site.')
-    parser.add_argument('--penalties', default='l2', help='Comma-separated: l1,l2,elasticnet')
-    parser.add_argument('--C', default='0.01', help='Comma-separated C values, e.g. 0.001,0.01,0.1,1')
-    parser.add_argument('--l1-ratios', default='0.5', help='Comma-separated, only used for elasticnet')
-    parser.add_argument('--threshold', type=float, default=0.5,
-                         help='Binary decision threshold for per-fold sens/spec/ppv/accuracy columns.')
-    parser.add_argument('--reward-thresholds', default='0.05,0.08,0.10,0.12,0.15,0.20',
-                         help='Thresholds swept for the pooled reward table.')
-    parser.add_argument('--no-calibration', action='store_true',
-                         help='Skip CalibratedClassifierCV wrapping (faster, for quick screening).')
-    parser.add_argument('--output-dir', required=True)
-    parser.add_argument('--max-configs', type=int, default=40,
-                         help='Safety cap on total sweep size — refuses to run a grid larger than this '
-                              'without --force, so a typo in --C doesn\'t accidentally launch 200 fits.')
-    parser.add_argument('--force', action='store_true')
-    args = parser.parse_args()
-
-    X, y, site, age = load_feature_cache(args.features_cache)
-    print(f"Loaded {len(y)} patients ({int(y.sum())} positive) from {args.features_cache}")
-    print(f"Sites: {dict(zip(*np.unique(site, return_counts=True)))}")
-
-    penalties = args.penalties.split(',')
-    C_values = [float(c) for c in args.C.split(',')]
-    l1_ratios = [float(r) for r in args.l1_ratios.split(',')] if 'elasticnet' in penalties else [None]
-
-    configs = []
-    for penalty in penalties:
-        if penalty == 'elasticnet':
-            for C, l1r in itertools.product(C_values, l1_ratios):
-                configs.append((penalty, C, l1r))
+    for r in results:
+        print(f"  [{r['metric']}]")
+        print(f"    candidate: {r['candidate']:.4f}   baseline: {r['baseline']:.4f}")
+        if r['metric'] == 'age_cond_auroc':
+            sites = r.get('candidate_sites')
+            if sites:
+                print(f"    candidate folds: {sites}")
+            print(f"    delta: {r['delta']:+.4f}   SE_diff: {r['se_diff']:.4f}   "
+                  f"sigmas: {r['sigmas']:+.2f} (threshold: {r['sigma_threshold']})")
         else:
-            for C in C_values:
-                configs.append((penalty, C, None))
+            print(f"    pct_drop: {r['pct_drop']:.1%}   tolerance: {r['max_pct_drop']:.1%}")
+            print(f"    note: {r['note']}")
+        print(f"    verdict: {r['verdict']}\n")
 
-    if len(configs) > args.max_configs and not args.force:
-        print(f"ERROR: sweep grid has {len(configs)} configs, exceeding --max-configs={args.max_configs}. "
-              f"Narrow your grid or pass --force if this is intentional.", file=sys.stderr)
-        sys.exit(2)
-
-    reward_thresholds = [float(t) for t in args.reward_thresholds.split(',')]
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    summary_rows = []
-    for penalty, C, l1_ratio in configs:
-        label = config_dirname(penalty, C, l1_ratio)
-        print(f"\n=== {label} ===")
-        config_dir = output_dir / label
-        config_dir.mkdir(parents=True, exist_ok=True)
-
-        results_rows, coef_rows, pooled_df = run_one_config(
-            X, y, age, site, args.rotate_i0002, penalty, C, l1_ratio,
-            calibrated=not args.no_calibration, threshold=args.threshold)
-
-        results_df = pd.DataFrame(results_rows)[REQUIRED_LOSO_RESULTS_COLUMNS]
-        results_df.to_csv(config_dir / 'loso_results.csv', index=False)
-
-        pd.DataFrame(coef_rows).to_csv(config_dir / 'coefficients.csv', index=False)
-
-        sweep_df = threshold_sweep(pooled_df, reward_thresholds,
-                                    prevalence_ages=age, prevalence_labels=y)
-        sweep_df.to_csv(config_dir / 'loso_threshold_sweep.csv', index=False)
-
-        mean_auroc = results_df['age_cond_auroc'].mean()
-        best_reward_row = sweep_df.loc[sweep_df['reward'].idxmax()]
-        print(f"  mean age_cond_auroc: {mean_auroc:.4f}")
-        print(f"  best reward: {best_reward_row['reward']:.4f} @ t={best_reward_row['threshold']}")
-
-        summary_rows.append({
-            'config': label, 'penalty': penalty, 'C': C, 'l1_ratio': l1_ratio,
-            'mean_age_cond_auroc': round(mean_auroc, 4),
-            'best_reward': round(best_reward_row['reward'], 4),
-            'best_reward_threshold': best_reward_row['threshold'],
-        })
-
-    summary_df = pd.DataFrame(summary_rows).sort_values('mean_age_cond_auroc', ascending=False)
-    summary_df.to_csv(output_dir / 'sweep_summary.csv', index=False)
-    print(f"\n{'='*60}\nSweep summary (sorted by mean age_cond_auroc):\n{'='*60}")
-    print(summary_df.to_string(index=False))
-    print(f"\nPer-config loso_results.csv files are ready for ratchet_check.py, e.g.:")
-    print(f"  python check_submission_files.py --loso-results "
-          f"{output_dir}/{summary_df.iloc[0]['config']}/loso_results.csv "
-          f"--ratchet-baseline large_logreg")
+    for m in other_messages:
+        print(f"NOTE: {m}\n")
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--loso-results', required=True,
+                         help='Path to loso_cv.py\'s per-fold results CSV.')
+    parser.add_argument('--baseline', required=True,
+                         help='Key into ratchet_baselines.json (e.g. small_entry3).')
+    parser.add_argument('--baselines-file', default=_DEFAULT_BASELINES_PATH)
+    parser.add_argument('--candidate-reward', type=float, default=None,
+                         help='Pooled reward at your chosen threshold, if you have one '
+                              '(from a separate threshold-sweep step). Optional.')
+    parser.add_argument('--sigma-threshold', type=float, default=1.0,
+                         help='AUROC regression must exceed this many pooled SEs to fail. '
+                              'Default 1.0 (matches the "noise floor" framing already used '
+                              'in learning_log.md).')
+    parser.add_argument('--max-reward-pct-drop', type=float, default=0.15,
+                         help='Reward regression tolerance as a fraction of baseline. '
+                              'Default 0.15 (15%%). NOT statistically derived.')
+    parser.add_argument('--auroc-col', default=None)
+    parser.add_argument('--n-pos-col', default=None)
+    parser.add_argument('--n-neg-col', default=None)
+    parser.add_argument('--site-col', default=None,
+                         help='Optional — used only for display, not the SE calculation.')
+    args = parser.parse_args()
+
+    try:
+        passed, results, messages = check_ratchet(
+            args.loso_results, args.baseline, args.baselines_file,
+            candidate_reward=args.candidate_reward,
+            sigma_threshold=args.sigma_threshold,
+            max_reward_pct_drop=args.max_reward_pct_drop,
+            auroc_col=args.auroc_col, n_pos_col=args.n_pos_col, n_neg_col=args.n_neg_col,
+            site_col=args.site_col,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    _print_report(args.baseline, results, messages)
+    print('PASS' if passed else 'FAIL')
+    sys.exit(0 if passed else 1)

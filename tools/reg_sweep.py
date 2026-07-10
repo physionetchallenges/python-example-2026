@@ -80,7 +80,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from features import FEATURE_NAMES_48, FEATURE_NAMES_50
 from features.pipeline import build_logreg_pipeline, extract_fitted_coefficients
 from evaluate_model import compute_prevalence, compute_reward, compute_auroc as _compute_auroc

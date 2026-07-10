@@ -326,7 +326,8 @@ if __name__ == "__main__":
     parser.add_argument("--ratchet-baseline", default=None,
                          help="Key into ratchet_baselines.json (e.g. small_entry3). "
                               "Required if --loso-results is passed.")
-    parser.add_argument("--baselines-file", default="ratchet_baselines.json")
+    parser.add_argument("--baselines-file",
+                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "ratchet_baselines.json"))
     parser.add_argument("--candidate-reward", type=float, default=None,
                          help="Pooled reward at your chosen threshold, if you have one. Optional — "
                               "without it, only the AUROC ratchet is checked.")
