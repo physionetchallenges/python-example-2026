@@ -18,6 +18,29 @@
 #          step added here — LOSO was validating a stale 48-feature model
 #          while this file had already moved to 50. See features/pipeline.py
 #          for the full incident writeup.
+# Entry 5 (2026-07-10): FIRST LARGE-TRAINING-SET SUBMISSION. Switched
+#          model_family from XGBoost to logistic regression
+#          (build_logreg_pipeline, features/pipeline.py). Evidence: on the
+#          large training set, logreg's mean age-conditioned AUROC (0.6002,
+#          both folds independently) beats every XGBoost/CatBoost variant
+#          tested (all clustered ~0.544), a real (2.36 sigma) effect, not
+#          noise — see learning_log.md, 2026-07-06/07 model-family
+#          diagnostic entries. Reward is unaffected either way (all model
+#          families land in the same 0.072-0.076 band at large scale) — this
+#          switch costs nothing on the metric that matters most and gains
+#          real ground on the metric that was weaker.
+#          THRESHOLD changed 0.12 -> 0.10 to match: logreg's own pooled
+#          threshold sweep picked a DIFFERENT optimum than XGBoost's — do
+#          not carry XGBoost's tuned value over by habit.
+#          xgboost stays in requirements.txt: features/pipeline.py still
+#          imports XGBClassifier unconditionally at module level (build_pipeline()
+#          still exists, just unused by this file now), so the dependency
+#          doesn't go away just because this file stopped calling it.
+#          CAVEAT: this is the first-ever large-set submission. Every number
+#          above is a LOSO estimate — zero large-set leaderboard data points
+#          exist yet to confirm the LOSO->leaderboard transfer at this scale.
+#          Treat this submission itself as the calibration point, not a
+#          confirmed result.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -39,7 +62,7 @@ from features.caisr_enriched     import extract_caisr_enriched_features
 from features.physiological_ratios import (extract_physiological_ratio_features,
                                             N_RATIO_FEATURES)
 from features.human              import extract_human_annotations_features
-from features.pipeline           import build_pipeline
+from features.pipeline           import build_logreg_pipeline
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
                       N_DEMOGRAPHIC_FEATURES)
 
@@ -55,14 +78,13 @@ _N_BASE     = N_CAISR_BASE_FEATURES      # 12
 _N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
 _N_RATIO    = N_RATIO_FEATURES           # 15
 
-# Entry 3 — calibration + threshold.
-# PLACEHOLDER — replace with the value loso_cv.py's loso_threshold_sweep.csv
-# recommends (maximizes reward without costing >~0.02 AUROC vs the AUROC-
-# optimal threshold). Do NOT submit with 0.10 unverified — run the sweep
-# first. Local prevalence is ~7.6% in the small training set; 0.5 (the old
-# default) is far too conservative for the reward metric.
+# Entry 5 — logreg's own pooled threshold sweep (large training set), NOT
+# XGBoost's Entry 3 value. Confirmed via loso_cv.py --model-family logreg:
+# reward peaks at t=0.10 (0.0719), not t=0.12 — a different optimum than
+# XGBoost's, do not carry the old value over by habit. See learning_log.md,
+# 2026-07-07 entry.
 #verified THRESHOLD
-THRESHOLD = 0.12
+THRESHOLD = 0.10
 
 ################################################################################
 # Required functions
@@ -176,13 +198,15 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── Model pipeline (Entry 2 XGBoost config + Entry 3 calibration +
-    #    Entry 4 AgeResidualizer) ───────────────────────────────────────────────
-    # Built via features/pipeline.py's build_pipeline() — the single shared
-    # definition also used by loso_cv.py, so the validation harness and this
-    # submission can never silently diverge on what "the model" is again
-    # (see features/pipeline.py header for the incident that motivated this).
-    model = build_pipeline(labels, calibrated=True)
+    # ── Model pipeline (Entry 5: logreg, C=0.01 default, calibrated,
+    #    AgeResidualizer on) ─────────────────────────────────────────────────
+    # Built via features/pipeline.py's build_logreg_pipeline() — the same
+    # shared definition loso_cv.py uses, so the validation harness and this
+    # submission can never silently diverge on what "the model" is (see
+    # features/pipeline.py header for the incident that motivated this
+    # discipline in the first place). Defaults match the confirmed LOSO
+    # result exactly: C=0.01, penalty=None (-> l2), calibration_ensemble=True.
+    model = build_logreg_pipeline(labels, calibrated=True)
     model.fit(features, labels)
 
     os.makedirs(model_folder, exist_ok=True)
@@ -246,12 +270,14 @@ def run_model(model, record, data_folder, verbose):
         ratio_f,
     ]).reshape(1, -1)
 
-    # ── Entry 3: calibrated probability + explicit threshold ──────────────────
+    # ── Entry 5: calibrated probability + explicit threshold ──────────────────
     # model.predict_proba() is already calibrated — calibration is baked into
     # the pipeline itself (see train_model()). model.predict() is NOT used
-    # here: its default 0.5 cutoff is far too conservative at ~7.6% local
-    # prevalence, which is why entry 1/2 reward was 0.011 despite reasonable
-    # AUROC. THRESHOLD is set from loso_cv.py's pooled threshold sweep.
+    # here: its default 0.5 cutoff is far too conservative for the reward
+    # metric at low local prevalence (this was Entry 1/2's mistake — reward
+    # 0.011 despite reasonable AUROC). THRESHOLD is set from loso_cv.py's
+    # pooled threshold sweep for THIS model family specifically (logreg,
+    # t=0.10) — not carried over from XGBoost's Entry 3 tuning (t=0.12).
     probability_output = model.predict_proba(features)[0][1]
     binary_output       = int(probability_output > THRESHOLD)
 
