@@ -100,18 +100,13 @@ KNOWN_MISLABELED_PATIENT_IDS = {'115257116'}
 # actual caisr_base.py return order before trusting this block; written
 # from FEATURES.md's documented order, not verified against the live
 # extraction function's actual array order.
-_IDX_AROUSAL_IDX = 10 + 1      # caisr_base[1] = Arousal_idx      ✓
-# caisr_base order (verified against caisr_base.py return array, 2026-07-14):
-#   [0] AHI_total  [1] Arousal_idx  [2] Limb_idx  [3] Wake%  [4] N1%
-#   [5] N2%  [6] N3%  [7] REM%  [8] Sleep_eff  [9] Prob_W  [10] Prob_N3  [11] Prob_arous
-# The original FEATURES.md comment (Wake_pct=local2) was wrong — caisr_base[2]
-# is Limb_idx; Wake% starts at local index 3. Fixed here 2026-07-14.
-_IDX_WAKE_PCT    = 10 + 3      # caisr_base[3] = Wake %
-_IDX_N1_PCT      = 10 + 4      # caisr_base[4] = N1 %
-_IDX_N2_PCT      = 10 + 5      # caisr_base[5] = N2 %
-_IDX_N3_PCT      = 10 + 6      # caisr_base[6] = N3 %
-_IDX_REM_PCT     = 10 + 7      # caisr_base[7] = REM %
-_IDX_SPONT_AROUSAL = 10 + 12 + 9  # caisr_enriched[9] = Spontaneous_arousal_idx  ✓
+_IDX_AROUSAL_IDX = 10 + 1      # caisr_base[1] = Arousal_idx — unchanged, was already correct
+_IDX_WAKE_PCT    = 10 + 3      # caisr_base[3] = Wake %  (was 10+2 — WRONG, fixed)
+_IDX_N1_PCT      = 10 + 4      # caisr_base[4] = N1 %    (was 10+3 — WRONG, fixed)
+_IDX_N2_PCT      = 10 + 5      # caisr_base[5] = N2 %    (was 10+4 — WRONG, fixed)
+_IDX_N3_PCT      = 10 + 6      # caisr_base[6] = N3 %    (was 10+5 — WRONG, fixed)
+_IDX_REM_PCT     = 10 + 7      # caisr_base[7] = REM %   (was 10+6 — WRONG, fixed)
+_IDX_SPONT_AROUSAL = 10 + 12 + 9  # caisr_enriched[9] = Spontaneous_arousal_idx — unchanged
 
 
 def extract_all_features_combined(data_folder, verbose=True):
@@ -339,6 +334,16 @@ def main():
                         'help single-feature candidates, so this is included for '
                         'completeness, not because it is expected to matter here.')
     p.add_argument('--rotate-i0002', action='store_true')
+    p.add_argument('--trimmed', action='store_true',
+                   help='Drop the 5 stationary-distribution features (r=0.998-1.000 '
+                        'vs existing stage %% features — near-pure duplicates) and '
+                        'burst_index (r=0.73 vs Arousal_idx — meaningfully redundant), '
+                        'per the 2026-07-14 collinearity findings. Keeps only the 5 '
+                        'components with low redundancy: transition_entropy, '
+                        'n3_to_wake_rate, rem_to_n3_rate, escalating_rate, '
+                        'cv_inter_arousal. Full collinearity report is still computed '
+                        'and printed on all 11 components regardless of this flag, '
+                        'for reference.')
     p.add_argument('--verbose', action='store_true', default=True)
     args = p.parse_args()
 
@@ -363,9 +368,33 @@ def main():
 
     report = collinearity_report(X48, combined)
     print('\n' + report)
+    out_dir.mkdir(parents=True, exist_ok=True)  # defensive re-create — a prior
+    # run hit FileNotFoundError here despite the mkdir() call at the top of
+    # main(), implying something removed the directory mid-run. Re-asserting
+    # it immediately before every write is cheap insurance against that.
     (out_dir / 'collinearity_report.txt').write_text(report)
 
-    X59 = np.hstack([X48, combined])
+    # Trimmed subset, per 2026-07-14 collinearity findings: stationary
+    # distribution (indices 4-8) is near-pure duplicate of existing
+    # stage %% features (r=0.998-1.000); burst_index (index 10) is
+    # meaningfully redundant with Arousal_idx (r=0.73). Kept indices:
+    # [0]=transition_entropy, [1]=n3_to_wake_rate, [2]=rem_to_n3_rate,
+    # [3]=escalating_rate, [9]=cv_inter_arousal.
+    _TRIMMED_IDX = [0, 1, 2, 3, 9]
+    _TRIMMED_LABELS = ['transition_entropy', 'n3_to_wake_rate', 'rem_to_n3_rate',
+                       'escalating_rate', 'cv_inter_arousal']
+
+    if args.trimmed:
+        combined_for_model = combined[:, _TRIMMED_IDX]
+        block_label = f'{len(_TRIMMED_IDX)}-feature trimmed NF1+NF2'
+        print(f'\n--trimmed: using only {_TRIMMED_LABELS} '
+              f'({combined_for_model.shape[1]} of 11 original components)')
+    else:
+        combined_for_model = combined
+        block_label = '11-feature NF1+NF2 combined'
+
+    X_with = np.hstack([X48, combined_for_model])
+    n_total_features = X_with.shape[1]
 
     age_to_prevalence = compute_prevalence(ages, y, ages, gap=2)
 
@@ -379,8 +408,8 @@ def main():
         r_without = run_fold(holdout, X48, y, ages, sites, age_to_prevalence,
                              label='WITHOUT NF1+NF2 (shipped 48-feature)',
                              C=args.C)
-        r_with    = run_fold(holdout, X59, y, ages, sites, age_to_prevalence,
-                             label='WITH NF1+NF2 combined (59-feature)',
+        r_with    = run_fold(holdout, X_with, y, ages, sites, age_to_prevalence,
+                             label=f'WITH {block_label} ({n_total_features}-feature)',
                              C=args.C)
         if r_without: rows.append(r_without)
         if r_with:    rows.append(r_with)
@@ -400,24 +429,26 @@ def main():
                   f"with={r_with['reward_at_t0.10']:.4f}")
 
     results_df = pd.DataFrame(rows)
-    out_csv = out_dir / 'ablation_results_combined.csv'
+    suffix = 'trimmed' if args.trimmed else 'combined'
+    out_dir.mkdir(parents=True, exist_ok=True)  # defensive re-create, see note above
+    out_csv = out_dir / f'ablation_results_{suffix}.csv'
     results_df.to_csv(out_csv, index=False)
     print(f'\nWrote {out_csv}')
 
     summary_lines = [
         '=' * 60,
-        '  NF1 (Markov transitions) + NF2 (arousal clustering) — Combined Ablation',
+        f'  NF1 (Markov transitions) + NF2 (arousal clustering) — {block_label} Ablation',
         '=' * 60,
         '',
         'Fixed config: logreg, C={}, l2, calibrated (cv5), AgeResidualizer on'.format(args.C),
-        'Only variable: presence/absence of the combined 11-feature block',
+        f'Only variable: presence/absence of the {block_label} block',
         '(NOT one-at-a-time — this is branch (a) after RB1\'s null, testing',
         'for interaction effects invisible to single-feature ablation)',
         '',
         results_df.to_string(index=False),
     ]
     summary = '\n'.join(summary_lines)
-    (out_dir / 'ablation_summary_combined.txt').write_text(summary)
+    (out_dir / f'ablation_summary_{suffix}.txt').write_text(summary)
     print('\n' + summary)
 
 

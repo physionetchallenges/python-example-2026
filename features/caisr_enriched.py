@@ -634,3 +634,144 @@ def extract_arousal_clustering_features(algo_data):
     burst_index = float(np.mean(intervals < 180.0))
 
     return np.array([cv, burst_index], dtype=float)
+
+# ── Backup tier rank 1: Time-of-night-conditional transitions ────────────
+# Per TESTING_STRATEGY_post_entry5.md: opened after the trimmed NF1+NF2
+# result (2026-07-15) resolved to the "branch (a) exhausted for this
+# feature family" gate row (S0001 AUROC flat at +0.18σ, reward pattern
+# shifted rather than strengthened). This is rank 1 of the backup tier —
+# cheapest to build (reuses the exact night-segmenting logic already
+# established by the shipped N3-gradient feature), tried before
+# conceding the transition-dynamics direction entirely.
+#
+# NOT wired into extract_caisr_enriched_features — same discipline as
+# every other candidate function in this file.
+#
+# Reuses _STATE_CODES / _STATE_IDX from the NF1 section above this one —
+# do not redefine; this function assumes NF1's code block already exists
+# earlier in this same file.
+
+N_TIME_OF_NIGHT_FEATURES = 2
+
+# Minimum occurrences of the "from" stage WITHIN a given third-of-night
+# segment to trust a self-transition probability computed from it. This
+# is deliberately smaller than NF1's _MIN_TRANSITIONS (40, for a whole-
+# night 5x5 matrix) because each of these two features only needs ONE
+# specific stage's self-transition count within ONE third of the night,
+# not a full matrix — a much lower bar for what counts as "enough data."
+# Not empirically validated, same caveat as _MIN_TRANSITIONS.
+_MIN_SEGMENT_FROM_COUNT = 3
+
+
+def _segment_stage_sequence(seq, n_segments=3):
+    """
+    Split an already-filtered stage-code sequence into n_segments
+    contiguous, equal-length chunks by epoch COUNT (not by target
+    duration) — the same segmenting philosophy as the shipped
+    n3_gradient feature (which splits at len(valid_stages)//2), just
+    generalized to thirds instead of halves.
+    """
+    n = len(seq)
+    edges = np.linspace(0, n, n_segments + 1).astype(int)
+    return [seq[edges[i]:edges[i + 1]] for i in range(n_segments)]
+
+
+def _self_transition_prob(segment, stage_code, min_from_count=_MIN_SEGMENT_FROM_COUNT):
+    """
+    P(stage_code -> stage_code) within this segment specifically — i.e.
+    given the patient was in `stage_code` at epoch t (within this
+    segment), what fraction of the time were they still in it at t+1.
+    NaN if the segment never visited this stage enough times to trust
+    the estimate (per min_from_count), not just if the segment is short
+    overall — a segment could be long but rarely visit N3, for instance.
+    """
+    if len(segment) < 2:
+        return float('nan')
+    from_mask = segment[:-1] == stage_code
+    n_from = int(from_mask.sum())
+    if n_from < min_from_count:
+        return float('nan')
+    stayed = int(np.sum(from_mask & (segment[1:] == stage_code)))
+    return stayed / n_from
+
+
+def extract_time_of_night_transition_features(algo_data):
+    """
+    Differential transition features comparing early-night vs. late-
+    night stage persistence — targets whether a patient's TRANSITION
+    BEHAVIOR itself shifts over the night, not just their overall stage
+    percentages (which the shipped n3_gradient feature already partly
+    captures, via raw N3 presence rather than transition probability).
+
+    The night is split into three equal-epoch-count thirds (early, mid,
+    late); the middle third is computed but not used by either feature
+    below — reserved for future extensions, not dead code by mistake.
+
+    Returns np.ndarray of length N_TIME_OF_NIGHT_FEATURES (2):
+        [0] homeostatic_decay_index =
+                P_early[N3->N3] - P_late[N3->N3]
+            Healthy sleep: N3 self-transition (staying in deep sleep
+            once there) should be HIGH early in the night and DECLINE
+            by the end, as homeostatic sleep pressure dissipates. A
+            positive value is the expected/healthy direction; a value
+            near zero or negative (N3 persistence NOT declining, or
+            even increasing, late in the night) is the hypothesized
+            CI-risk pattern — not assumed true, this is what the
+            ablation is meant to test.
+        [1] rem_escalation_delta =
+                P_late[REM->REM] - P_early[REM->REM]
+            Healthy sleep: REM self-transition (staying in REM once
+            there) should INCREASE over the night as REM-drive
+            dominates the later cycles. A positive value is the
+            expected/healthy direction.
+
+    REQUIRED before ablation-testing [0] as independent: check
+    correlation against the existing n3_gradient feature (caisr_enriched
+    index 8, "N3 first-half/second-half ratio") — both features target
+    a similar early-vs-late N3 concept via different mechanisms (raw
+    presence ratio vs. self-transition probability), so this is a
+    genuine collinearity risk, not a formality. Not computed here — see
+    the ablation script.
+
+    NaN fallback (either or both values independently):
+        - Missing CAISR annotations -> both NaN
+        - Fewer than 2 valid stage epochs -> both NaN
+        - The relevant stage's self-transition probability is undefined
+          in the relevant segment (fewer than _MIN_SEGMENT_FROM_COUNT
+          occurrences of that stage as a "from" state in that third of
+          the night) -> that specific value NaN, independently of the
+          other one (e.g. homeostatic_decay_index can be NaN while
+          rem_escalation_delta is a real number, if N3 was too sparse
+          early or late but REM wasn't)
+    """
+    if not algo_data:
+        return np.full(N_TIME_OF_NIGHT_FEATURES, float('nan'))
+
+    stages_raw = algo_data.get('stage_caisr', np.array([]))
+    valid_stages = stages_raw[stages_raw < 9.0] if len(stages_raw) > 0 else np.array([])
+
+    mask = np.isin(valid_stages, _STATE_CODES)
+    seq = valid_stages[mask]
+
+    if len(seq) < 2:
+        return np.full(N_TIME_OF_NIGHT_FEATURES, float('nan'))
+
+    early, mid, late = _segment_stage_sequence(seq, n_segments=3)
+
+    p_n3_early  = _self_transition_prob(early, 1)  # N3 code = 1
+    p_n3_late   = _self_transition_prob(late,  1)
+    p_rem_early = _self_transition_prob(early, 4)   # REM code = 4
+    p_rem_late  = _self_transition_prob(late,  4)
+
+    homeostatic_decay = (
+        p_n3_early - p_n3_late
+        if not (np.isnan(p_n3_early) or np.isnan(p_n3_late))
+        else float('nan')
+    )
+    rem_escalation = (
+        p_rem_late - p_rem_early
+        if not (np.isnan(p_rem_late) or np.isnan(p_rem_early))
+        else float('nan')
+    )
+
+    return np.array([homeostatic_decay, rem_escalation], dtype=float)
