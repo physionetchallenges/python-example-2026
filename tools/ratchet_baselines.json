@@ -43,6 +43,29 @@
     "leaderboard_note": "NOT YET SUBMITTED. No large-training-set config of any kind has been submitted to the real leaderboard as of 2026-07-08 — this is a LOSO-only estimate. Treat any ratchet PASS against this baseline as 'not worse than our best local estimate', not as a leaderboard guarantee."
   },
 
+  "entry5_3site": {
+    "description": "Entry 5 config as ACTUALLY SHIPPED: logreg, C=0.01 (l2, LOGREG_PARAMS default), CalibratedClassifierCV(sigmoid, cv=5), AgeResidualizer on, NO sample weighting, THRESHOLD=0.10. Large training set, 3-site LOSO rotation (I0006/S0001/I0002, via --rotate-i0002). This is the correct baseline for any Entry 6+ ratchet check — do NOT use 'large_logreg' for that purpose, which is a 2-site-rotation, pre-Entry-5 config and is not a fair comparison (different fold composition, independent of any model change).",
+    "scale": "large",
+    "model_family": "logreg",
+    "feature_count": 50,
+    "folds": [
+      {"site": "I0006", "age_cond_auroc": 0.6184, "n_pos": 112, "n_neg": 1030},
+      {"site": "S0001", "age_cond_auroc": 0.5905, "n_pos": 333, "n_neg": 4805},
+      {"site": "I0002", "age_cond_auroc": 0.7259, "n_pos": 52, "n_neg": 267}
+    ],
+    "age_cond_auroc": 0.6449,
+    "reward": 0.0882,
+    "reward_threshold": 0.10,
+    "date_confirmed": "2026-07-15",
+    "source": "learning_log_p2.md, 2026-07-15 (L1/L2 grid reproducibility-floor entry) — this run's own fresh l2/C=0.01 re-run via reg_sweep.py, explicitly established there as the reference point for every subsequent branch (b) comparison in the C=0.001/alpha=1.0 chain (0.6449 -> 0.6485 -> 0.6459). Supersedes the original 2026-07-08 loso_cv.py numbers (I0006 0.6154/S0001 0.5850/I0002 0.7328, mean 0.6444) — same config, ~0.005-0.007 AUROC run-to-run noise floor established in that same entry, not a real difference. Fold n_pos/n_neg cross-checked against the uploaded alpha1_reproduction/loso_results.csv (2026-07-16 final reproduction run) — identical data split (post-denylist); note S0001 n_pos=333 here vs. 334 in the older 2026-07-08 log, consistent with the 1-patient denylist exclusion applied in later runs.",
+    "leaderboard_confirmed": true,
+    "leaderboard_auroc": 0.660,
+    "leaderboard_reward": 0.101,
+    "leaderboard_standard_auroc": 0.826,
+    "leaderboard_accuracy": 0.869,
+    "leaderboard_note": "Entry 5 WAS submitted (submission 2156, commit 8060971c9195bdaa2fbd4127b5a9c9a2be18e961): reward 0.101, age-conditioned AUROC 0.660, age-weighted AUROC 0.664, standard AUROC 0.826, AUPRC 0.303, accuracy 0.869, F-measure 0.372. Leaderboard age-cond AUROC (0.660) exceeds this LOSO estimate (0.6449) by +0.011 — consistent with, though smaller than, this project's established LOSO-always-underestimates-leaderboard pattern (prior gaps: +0.125 Entry 1, +0.076 Entry 2, +0.060 Entry 5 vs. an earlier LOSO estimate)."
+  },
+
   "large_xgboost_age_resid": {
     "description": "XGBoost, large training set, cv5 calibration, WITH age-residual features (Entry 4 config, 50 features). Reference point for the reward-collapse investigation — NOT a recommended submission candidate given logreg's AUROC advantage at no reward cost.",
     "scale": "large",

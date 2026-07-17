@@ -41,6 +41,28 @@
 #          exist yet to confirm the LOSO->leaderboard transfer at this scale.
 #          Treat this submission itself as the calibration point, not a
 #          confirmed result.
+# Entry 6 (2026-07-19): Two independently-validated, compounding levers on
+#          top of the Entry 5 logreg pipeline — branch (a) feature work
+#          (NF1/NF2, time-of-night) and the age-banded threshold both closed
+#          with null/falsified results and are NOT reopened here (see
+#          learning_log_3, 2026-07-16 entries).
+#          1. C changed 0.01 -> 0.001 (build_logreg_pipeline's C= arg):
+#             reward +35% relative at 3-site LOSO, AUROC flat. Reproduced
+#             exactly across two independent Kaggle runs.
+#          2. Value-weighted sample weighting added at .fit() time, alpha=1.0
+#             (compute_value_weighted_sample_weights, features/
+#             sample_weighting.py — promoted from tools/reg_sweep.py, same
+#             shared-module precedent as AgeResidualizer): additional +12.9%
+#             relative reward on top of #1, AUROC still flat (max 0.21σ
+#             across all 3 folds). Reproduced bit-for-bit on an independent
+#             Kaggle run. train_model() has no fold rotation, so the weights
+#             are computed on the full training set passed in — this is
+#             itself the leakage-safe usage (see that function's docstring).
+#          Combined: +52% relative reward vs. the original shipped Entry 5
+#          baseline (0.1354 vs. 0.089 at 3-site LOSO), AUROC flat throughout
+#          the entire chain (0.6449 -> 0.6485 -> 0.6459, all within noise).
+#          THRESHOLD changed 0.10 -> 0.08 to match the new probability
+#          distribution's own pooled threshold sweep optimum.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -63,8 +85,9 @@ from features.physiological_ratios import (extract_physiological_ratio_features,
                                             N_RATIO_FEATURES)
 from features.human              import extract_human_annotations_features
 from features.pipeline           import build_logreg_pipeline
+from features.sample_weighting   import compute_value_weighted_sample_weights
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
-                      N_DEMOGRAPHIC_FEATURES)
+                      N_DEMOGRAPHIC_FEATURES, IDX_AGE)
 
 ################################################################################
 # Configuration
@@ -78,13 +101,20 @@ _N_BASE     = N_CAISR_BASE_FEATURES      # 12
 _N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
 _N_RATIO    = N_RATIO_FEATURES           # 15
 
-# Entry 5 — logreg's own pooled threshold sweep (large training set), NOT
-# XGBoost's Entry 3 value. Confirmed via loso_cv.py --model-family logreg:
-# reward peaks at t=0.10 (0.0719), not t=0.12 — a different optimum than
-# XGBoost's, do not carry the old value over by habit. See learning_log.md,
-# 2026-07-07 entry.
+# Entry 6 — new pooled threshold sweep optimum for the C=0.001 + alpha=1.0
+# sample-weighted probability distribution. Confirmed via reg_sweep.py:
+# reward peaks at t=0.08 (0.1354) — a different optimum than Entry 5's
+# t=0.10, because the underlying probability distribution itself shifted
+# (both the regularization change and the sample weighting reshape the
+# calibrated output, not just the ranking). See learning_log_3, 2026-07-16.
 #verified THRESHOLD
-THRESHOLD = 0.10
+THRESHOLD = 0.08
+
+# Entry 6 — value-weighted sample-weighting boost applied at .fit() time
+# (compute_value_weighted_sample_weights, features/sample_weighting.py).
+# alpha=1.0 is the validated, reproduced value — do not change without a
+# new sweep + reproduction run, same discipline as C and THRESHOLD above.
+SAMPLE_WEIGHT_ALPHA = 1.0
 
 ################################################################################
 # Required functions
@@ -198,16 +228,37 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── Model pipeline (Entry 5: logreg, C=0.01 default, calibrated,
-    #    AgeResidualizer on) ─────────────────────────────────────────────────
+    # ── Model pipeline (Entry 6: logreg, C=0.001, value-weighted sample
+    #    weighting at alpha=1.0, calibrated, AgeResidualizer on) ─────────────
     # Built via features/pipeline.py's build_logreg_pipeline() — the same
-    # shared definition loso_cv.py uses, so the validation harness and this
-    # submission can never silently diverge on what "the model" is (see
-    # features/pipeline.py header for the incident that motivated this
-    # discipline in the first place). Defaults match the confirmed LOSO
-    # result exactly: C=0.01, penalty=None (-> l2), calibration_ensemble=True.
-    model = build_logreg_pipeline(labels, calibrated=True)
-    model.fit(features, labels)
+    # shared definition loso_cv.py/reg_sweep.py uses, so the validation
+    # harness and this submission can never silently diverge on what "the
+    # model" is (see features/pipeline.py header for the incident that
+    # motivated this discipline in the first place). C=0.001 and
+    # alpha=1.0 are both independently reproduced on Kaggle (see
+    # learning_log_3, 2026-07-16 entries) — do not change either without a
+    # fresh reproduction run.
+    model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
+
+    # train_model() has no fold rotation — it trains once on whatever
+    # training set the organizers provide — so computing the weights on
+    # the full `labels`/age_train passed in here IS the leakage-safe usage
+    # (see compute_value_weighted_sample_weights' docstring for why this
+    # differs from reg_sweep.py's per-LOSO-fold call, which only ever sees
+    # that fold's training split).
+    age_train = features[:, IDX_AGE]
+    sample_weight = compute_value_weighted_sample_weights(
+        labels, age_train, alpha=SAMPLE_WEIGHT_ALPHA)
+
+    # 'classifier' is build_logreg_pipeline's final step name — sklearn's
+    # Pipeline routes fit_params via the 'stepname__paramname' convention.
+    # CalibratedClassifierCV.fit() accepts and forwards sample_weight to
+    # the wrapped LogisticRegression. (2026-07-16 incident: a leftover
+    # duplicate unweighted .fit() call was caught and removed during
+    # implementation on Kaggle — it would have silently discarded the
+    # weighting entirely with zero errors raised. There is only ONE .fit()
+    # call below; keep it that way.)
+    model.fit(features, labels, classifier__sample_weight=sample_weight)
 
     os.makedirs(model_folder, exist_ok=True)
     save_model(model_folder, model)
@@ -270,14 +321,16 @@ def run_model(model, record, data_folder, verbose):
         ratio_f,
     ]).reshape(1, -1)
 
-    # ── Entry 5: calibrated probability + explicit threshold ──────────────────
+    # ── Entry 6: calibrated probability + explicit threshold ──────────────────
     # model.predict_proba() is already calibrated — calibration is baked into
     # the pipeline itself (see train_model()). model.predict() is NOT used
     # here: its default 0.5 cutoff is far too conservative for the reward
     # metric at low local prevalence (this was Entry 1/2's mistake — reward
-    # 0.011 despite reasonable AUROC). THRESHOLD is set from loso_cv.py's
-    # pooled threshold sweep for THIS model family specifically (logreg,
-    # t=0.10) — not carried over from XGBoost's Entry 3 tuning (t=0.12).
+    # 0.011 despite reasonable AUROC). THRESHOLD is set from reg_sweep.py's
+    # pooled threshold sweep for the C=0.001 + alpha=1.0 sample-weighted
+    # probability distribution specifically (t=0.08) — not carried over from
+    # Entry 5's t=0.10, since both the regularization change and the sample
+    # weighting reshape the calibrated output, not just the ranking.
     probability_output = model.predict_proba(features)[0][1]
     binary_output       = int(probability_output > THRESHOLD)
 
