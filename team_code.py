@@ -63,6 +63,49 @@
 #          the entire chain (0.6449 -> 0.6485 -> 0.6459, all within noise).
 #          THRESHOLD changed 0.10 -> 0.08 to match the new probability
 #          distribution's own pooled threshold sweep optimum.
+# Entry 7 (2026-07-19, TESTED BUT NOT SHIPPED): MCI-targeted sample
+#          weighting (compute_mci_boosted_weights, features/subtype_
+#          weighting.py), beta_mci=0.75 layered on top of Entry 6's
+#          alpha=1.0. Validated on its own: +5.6% relative reward, S0001
+#          AUROC flat, MCI sensitivity 76.8% -> 85.9% (tools/ablation_mci_
+#          sample_weight.py). Deliberately held back from Entry 8 below —
+#          both changes touch the sample-weighting layer, and shipping
+#          them together would make it impossible to attribute any
+#          outcome to either one individually (the exact ambiguity that
+#          made Entry 6's own regression so hard to diagnose). beta_mci
+#          =0.75 was also tuned against the 50-feature model, not Entry
+#          8's 39-feature one — the value would need re-validating against
+#          the new feature set, not carried over unchanged. features/
+#          subtype_weighting.py remains in the repo, unused by this file,
+#          for exactly that future re-test. See learning_log.md, 2026-
+#          07-19/20.
+# Entry 8 (2026-07-20): drops 11 SIGN-FLIPPING features — coefficients
+#          that changed direction depending on which 2 of the 3 training
+#          sites fit the model (features/feature_selection.py,
+#          STAGE1_DROP_FEATURES) — direct, measured evidence of site-
+#          specific overfitting, from the cross-fold coefficient analysis.
+#          Validated via tools/ablation_drop_signflip_features.py "Stage
+#          1": +8.2% relative reward, mean age-conditioned AUROC 0.6459 ->
+#          0.6711, ALL THREE LOSO folds improved simultaneously (not a
+#          mixed result), cross-fold spread shrank 0.1264 -> 0.1145 (more
+#          STABLE, not just better on average — the specific signature
+#          this theory predicted). Reproduced bit-for-bit across an
+#          independent Kaggle kernel restart. THRESHOLD changed 0.08 ->
+#          0.10 to match this config's own pooled reward-sweep optimum
+#          (t=0.10 gave best reward 0.1434, vs. the prior t=0.08's 0.1325
+#          on the unchanged 50-feature model) — same "re-tune the
+#          threshold for the new probability distribution, don't carry
+#          the old value over" discipline as every prior threshold change.
+#          Stage 2 of that same ablation (also dropping CA_rate_age_
+#          residual and Race_Black/White/Asian) scored higher still and
+#          clears the pre-committed 1.0-sigma gate outright — deliberately
+#          NOT included here. CA_rate_age_residual carries its own Entry 4
+#          validation history; the Race_* features carry real, documented
+#          demographic signal that coefficient instability alone doesn't
+#          invalidate. Both deserve separate, specific justification
+#          before being dropped — not bundled in just because Stage 1
+#          worked. See features/feature_selection.py header and
+#          learning_log.md, 2026-07-20, for the full reasoning.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -86,8 +129,11 @@ from features.physiological_ratios import (extract_physiological_ratio_features,
 from features.human              import extract_human_annotations_features
 from features.pipeline           import build_logreg_pipeline
 from features.sample_weighting   import compute_value_weighted_sample_weights
+from features.feature_selection  import FeatureDropper, STAGE1_DROP_FEATURES
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
                       N_DEMOGRAPHIC_FEATURES, IDX_AGE)
+
+from sklearn.pipeline import Pipeline
 
 ################################################################################
 # Configuration
@@ -101,14 +147,14 @@ _N_BASE     = N_CAISR_BASE_FEATURES      # 12
 _N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
 _N_RATIO    = N_RATIO_FEATURES           # 15
 
-# Entry 6 — new pooled threshold sweep optimum for the C=0.001 + alpha=1.0
-# sample-weighted probability distribution. Confirmed via reg_sweep.py:
-# reward peaks at t=0.08 (0.1354) — a different optimum than Entry 5's
-# t=0.10, because the underlying probability distribution itself shifted
-# (both the regularization change and the sample weighting reshape the
-# calibrated output, not just the ranking). See learning_log_3, 2026-07-16.
+# Entry 8 — new pooled reward-sweep optimum for the 39-feature (Stage 1
+# sign-flip features dropped) probability distribution. Confirmed via
+# tools/ablation_drop_signflip_features.py: reward peaks at t=0.10
+# (0.1434) — a different optimum than the prior 50-feature model's
+# t=0.08, because dropping features reshapes the calibrated output, not
+# just the ranking. See learning_log.md, 2026-07-20.
 #verified THRESHOLD
-THRESHOLD = 0.08
+THRESHOLD = 0.10
 
 # Entry 6 — value-weighted sample-weighting boost applied at .fit() time
 # (compute_value_weighted_sample_weights, features/sample_weighting.py).
@@ -228,17 +274,30 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── Model pipeline (Entry 6: logreg, C=0.001, value-weighted sample
-    #    weighting at alpha=1.0, calibrated, AgeResidualizer on) ─────────────
+    # ── Model pipeline (Entry 8: logreg, C=0.001, value-weighted sample
+    #    weighting at alpha=1.0, calibrated, AgeResidualizer on, Stage 1
+    #    sign-flip features dropped) ───────────────────────────────────────
     # Built via features/pipeline.py's build_logreg_pipeline() — the same
     # shared definition loso_cv.py/reg_sweep.py uses, so the validation
     # harness and this submission can never silently diverge on what "the
     # model" is (see features/pipeline.py header for the incident that
-    # motivated this discipline in the first place). C=0.001 and
-    # alpha=1.0 are both independently reproduced on Kaggle (see
-    # learning_log_3, 2026-07-16 entries) — do not change either without a
-    # fresh reproduction run.
-    model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
+    # motivated this discipline in the first place). C=0.001 and alpha=1.0
+    # are both independently reproduced on Kaggle (see learning_log_3,
+    # 2026-07-16 entries) — do not change either without a fresh
+    # reproduction run.
+    #
+    # FeatureDropper (features/feature_selection.py) is inserted
+    # immediately after 'age_residual' and before 'imputer' — it MUST sit
+    # there, not earlier, so AgeResidualizer's own source features (e.g.
+    # CA_rate, used to compute CA_rate_age_residual, which is KEPT here)
+    # are still present when AgeResidualizer runs, even though the raw
+    # CA_rate column itself is one of the 11 dropped. Do not reorder these
+    # steps.
+    _base_model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
+    model = Pipeline(
+        [_base_model.steps[0], ('feature_dropper', FeatureDropper(STAGE1_DROP_FEATURES))]
+        + _base_model.steps[1:]
+    )
 
     # train_model() has no fold rotation — it trains once on whatever
     # training set the organizers provide — so computing the weights on
@@ -321,16 +380,16 @@ def run_model(model, record, data_folder, verbose):
         ratio_f,
     ]).reshape(1, -1)
 
-    # ── Entry 6: calibrated probability + explicit threshold ──────────────────
+    # ── Entry 8: calibrated probability + explicit threshold ──────────────────
     # model.predict_proba() is already calibrated — calibration is baked into
     # the pipeline itself (see train_model()). model.predict() is NOT used
     # here: its default 0.5 cutoff is far too conservative for the reward
     # metric at low local prevalence (this was Entry 1/2's mistake — reward
-    # 0.011 despite reasonable AUROC). THRESHOLD is set from reg_sweep.py's
-    # pooled threshold sweep for the C=0.001 + alpha=1.0 sample-weighted
-    # probability distribution specifically (t=0.08) — not carried over from
-    # Entry 5's t=0.10, since both the regularization change and the sample
-    # weighting reshape the calibrated output, not just the ranking.
+    # 0.011 despite reasonable AUROC). THRESHOLD is set from tools/ablation_
+    # drop_signflip_features.py's pooled reward sweep for the 39-feature
+    # (Stage 1 dropped) probability distribution specifically (t=0.10) — not
+    # carried over from Entry 6's t=0.08, since dropping features reshapes
+    # the calibrated output, not just the ranking.
     probability_output = model.predict_proba(features)[0][1]
     binary_output       = int(probability_output > THRESHOLD)
 
