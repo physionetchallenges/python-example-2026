@@ -18,9 +18,11 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
         
 
 
+    p = Info['Parameters']
+
     # 2. Cluster test parameter check
-    if getattr(Info['Parameters'], 'Channels_ClusterTest', True):
-        if not hasattr(Info['Recording'], 'ChannelNeighbours'):
+    if p.get('Channels_ClusterTest', True):
+        if 'ChannelNeighbours' not in Info['Recording']:
             print("Calculating: Channel Neighbours...", end="")
             # Asume la existencia de la función externa swa_channelNeighbours
             Info['Recording']['ChannelNeighbours'] = swa_channelNeighbours(Info['Electrodes'])
@@ -29,16 +31,16 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
             print("Information: Using channels neighbourhood in 'Info'.")
 
     # 3. Parameter default settings for Envelope method
-    if getattr(Info['Parameters'], 'Ref_Method', '') == 'Envelope':
-        if not hasattr(Info['Parameters'], 'Channels_Threshold'):
+    if p.get('Ref_Method', '').lower() == 'envelope':
+        if 'Channels_Threshold' not in p:
             print("Warning: No further SW parameters found in Info; using defaults")
             Info['Parameters']['Channels_Threshold'] = 0.9
             Info['Parameters']['Channels_WinSize'] = 0.2
 
     # 4. Filter data if not already done
-    if hasattr(Data, 'Filtered') and Data.Filtered is not None:
-        if Data.Filtered.size == 0:
-            Data.Filtered = swa_filter_data(Data['Raw'], Info)
+    if Data.get('Filtered') is not None:
+        if Data['Filtered'].size == 0:
+            Data['Filtered'] = swa_filter_data(Data['Raw'], Info)
     else:
         print("Calculation: Filtering Data.")
         Data['Filtered'] = swa_filter_data(Data['Raw'], Info)
@@ -66,8 +68,8 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
         # Iteración con barra de progreso tqdm
         for nSW, sw in enumerate(tqdm(SW, disable=not flag_progress, desc="Finding Slow Waves (Correlation)")):
             
-            # Ajuste de índice de MATLAB (1-based) a Python (0-based)
-            ref_peak_ind = int(sw['Ref_PeakInd']) - 1
+            # Ref_PeakInd is already zero-based in swa_FindSWRef.
+            ref_peak_ind = int(sw['Ref_PeakInd'])
 
             # Check search window bounds
             if ref_peak_ind - win * 2 < 0 or ref_peak_ind + win * 2 >= n_samples:
@@ -78,7 +80,7 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
             shortData = Data['Filtered'][:,ref_peak_ind - win * 2 : ref_peak_ind + win * 2 + 1]
 
             # Get canonical wave reference data
-            correlate_type = getattr(Info['Parameters'], 'Channels_Correlate2', 'all')
+            correlate_type = p.get('Channels_Correlate2', 'all')
             
             if correlate_type == 'mean':
                 # En Python los índices de regiones deben ser enteros o booleanos
@@ -101,7 +103,7 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
             maxID = np.argmax(cc, axis=1)
 
             # 1. Forzamos a que maxCC sea un vector plano 1D (elimina cualquier dimensión extra como (N, 1))
-            maxCC_1d = np.squeeze(np.asarray(maxCC))
+            maxCC_1d = np.asarray(maxCC).reshape(-1)
 
             # 2. Creamos channels_active como un vector booleano puramente 1D de tamaño (n_channels,)
             channels_active = maxCC_1d > Info['Parameters']['Channels_Threshold']
@@ -129,7 +131,7 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
             deactivate_mask = (sw['Channels_NegAmp'][:, 0] > amp_thresh).flatten()
             channels_active[deactivate_mask] = False
 
-            if getattr(Info['Parameters'], 'Channels_ClusterTest', True):
+            if p.get('Channels_ClusterTest', True):
                 clusters = swa_cluster_test(channels_active.astype(float), Info['Recording']['ChannelNeighbours'], 0.01)
                 clusters[np.isnan(clusters)] = 0
                 n_clusters = np.unique(clusters)
@@ -179,12 +181,12 @@ def swa_FindSWChannels(Data, Info, SW, flag_progress=True):
     # THRESHOLD METHOD
     # =========================================================================
     elif detection_method == 'threshold':
-        if not getattr(Info['Parameters'], 'Ref_Peak2Peak', None):
+        if not p.get('Ref_Peak2Peak'):
             Info['Parameters']['Ref_Peak2Peak'] = abs(Info['Parameters']['Ref_NegAmpMin']) * 1.75
 
         for nSW, sw in enumerate(tqdm(SW, disable=not flag_progress, desc="Finding Slow Waves (Threshold)")):
             
-            ref_peak_ind = int(sw['Ref_PeakInd']) - 1
+            ref_peak_ind = int(sw['Ref_PeakInd'])
 
             if ref_peak_ind - win < 0 or ref_peak_ind + win * 3 >= n_samples:
                 to_delete.add(nSW)

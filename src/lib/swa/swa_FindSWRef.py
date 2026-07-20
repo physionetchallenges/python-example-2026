@@ -37,7 +37,7 @@ def swa_FindSWRef(Data, Info, SW=None):
     OSWCount = len(SW)
     SWCount = len(SW)
     
-    number_ref_waves = Data['SWRef'].shape[1]
+    number_ref_waves = Data['SWRef'].shape[0]
     
     # Inicializar vectores de umbrales según el criterio
     if p.get('Ref_AmplitudeCriteria') == 'relative':
@@ -54,7 +54,8 @@ def swa_FindSWRef(Data, Info, SW=None):
     if p.get('Ref_AmplitudeCriteria') == 'absolute':
         abs_val = np.atleast_1d(p['Ref_AmplitudeAbsolute'])
         if len(abs_val) < number_ref_waves:
-            p['Ref_AmplitudeAbsolute'] = np.repeat(abs_val[0], number_ref_waves)
+            abs_val = np.repeat(abs_val[0], number_ref_waves)
+        p['Ref_AmplitudeAbsolute'] = abs_val
             
     sRate = Info['Recording']['sRate']
     
@@ -63,7 +64,7 @@ def swa_FindSWRef(Data, Info, SW=None):
         if ref_wave > 0:
             OSWCount = len(SW)
             
-        ref_signal = Data['SWRef'][:, ref_wave]
+        ref_signal = Data['SWRef'][ref_wave, :]
         
         # Calcular la derivada de la señal (añadiendo un 0 inicial para mantener longitud)
         slopeData = np.concatenate(([0], np.diff(ref_signal)))

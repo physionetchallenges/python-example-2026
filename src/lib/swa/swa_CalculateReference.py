@@ -23,6 +23,10 @@ def swa_CalculateReference(data, Info, display_plot=False):
     Info : dict
         Updated Info dictionary with chosen parameters and reference electrodes.
     """
+    data = np.asarray(data, dtype=float)
+    if data.ndim != 2:
+        raise ValueError("Error: EEG data must have shape (channels, samples)")
+
     # 1. Validaciones de estructura iniciales
     if 'Electrodes' not in Info:
         raise ValueError("Error: No electrode information found in Info")
@@ -91,7 +95,6 @@ def swa_CalculateReference(data, Info, display_plot=False):
             nData = np.mean(rData[1:nCh, :], axis=0, keepdims=True)
         else:
             nData = np.mean(rData[0:nCh, :], axis=0, keepdims=True)
-            nData = rData
             
     elif ref_method in ['square', 'diamond']:
         distance_from_center = 0.2

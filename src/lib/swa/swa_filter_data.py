@@ -19,7 +19,7 @@ def swa_filter_data(data, Info):
         Filtered EEG data of shape (n_channels, n_samples).
     """
     # 1. Verificar el orden del filtro por defecto
-    if not hasattr(Info['Parameters'], 'Filter_order') or Info['Parameters']['Filter_order'] is None:
+    if Info['Parameters'].get('Filter_order') is None:
         Info['Parameters']['Filter_order'] = 2
 
     # Extraer método en minúsculas para evitar problemas de mayúsculas/minúsculas
@@ -38,12 +38,11 @@ def swa_filter_data(data, Info):
         
         # Calcular el orden óptimo del filtro Chebyshev y las frecuencias naturales
         n, Wn = signal.cheb2ord(Wp, Ws, Rp, Rs)
-        Wn = [0.001, 0.08]  # TODO: Mejorra debugueo, ahora forzado a igual que Matlab con valores por defecto
         # Diseñar el filtro Chebyshev Tipo II (pasa-banda automático al pasar 2 frecuencias)
         bbp, abp = signal.cheby2(n, Rs, Wn, btype='bandpass')
         
         # Aplicar el filtro de fase cero a lo largo del eje del tiempo (axis=-1)
-        filtData = signal.filtfilt(bbp, abp, data, axis=0)
+        filtData = signal.filtfilt(bbp, abp, data, axis=-1)
 
     # =========================================================================
     # METODO BUTTERWORTH (Soporta la errata 'buttersworth' del script original)

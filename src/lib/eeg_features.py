@@ -1,14 +1,40 @@
 """EEG feature helpers used by the active submission pipeline."""
 
-from scipy.signal import butter, filtfilt
+from contextlib import nullcontext, redirect_stdout
+import io
+
 import numpy as np
-from scipy.signal import welch
 import pandas as pd
+from scipy.signal import butter, filtfilt, welch
 from scipy.stats import kurtosis, entropy
-from src.lib.swa import swa_getInfoDefaults 
-from src.lib.swa import swa_CalculateReference
-from src.lib.swa import swa_FindSWRef
-from src.lib.swa import swa_FindSWChannels
+
+from .swa import swa_CalculateReference
+from .swa import swa_FindSWChannels
+from .swa import swa_FindSWRef
+from .swa import swa_getInfoDefaults
+
+
+SLOW_WAVE_FEATURE_NAMES = (
+    'TotalSW',
+    'SWdensity',
+    'SWpeakAmp_mean',
+    'SWpeakAmp_std',
+    'SWp2p_mean',
+    'SWp2p_std',
+    'SWnegSlope_mean',
+    'SWnegSlope_std',
+    'SWposSlope_mean',
+    'SWposSlope_std',
+    'SWduration_mean',
+    'SWduration_std',
+)
+
+_SLOW_WAVE_EVENT_FIELDS = {
+    'SWpeakAmp': 'Ref_PeakAmp',
+    'SWp2p': 'Ref_P2PAmp',
+    'SWnegSlope': 'Ref_NegSlope',
+    'SWposSlope': 'Ref_PosSlope',
+}
 
 def _safe_sqrt_variance_ratio(numerator_signal, denominator_signal):
     numerator_var = np.var(numerator_signal)
@@ -65,19 +91,93 @@ def extract_band_powers(epochs, fs, win_len = 2):
 
     return pd.DataFrame(features), pd.DataFrame(complexities)
 
-def get_SW_features(signal, fs):
-    info = swa_getInfoDefaults.swa_getInfoDefaults({}, 'SW', method='envelope')
-    info['Electrodes'] = ['Ej']
-    info['Recording'] = {}
-    info['Recording']['sRate'] = fs
+def _finite_slow_wave_values(slow_waves, field_name):
+    values = []
+    for wave in slow_waves:
+        try:
+            value = float(np.asarray(wave[field_name]).squeeze())
+        except (KeyError, TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    return np.asarray(values, dtype=float)
 
-    data = {}
-    data['Raw'] = pd.DataFrame({'Signal': signal})
-    data['SWRef'], Info  = swa_CalculateReference.swa_CalculateReference (data['Raw'], info, False)
-    Info['Parameters']['Ref_InspectionPoint'] = 'ZC'
-    data, Info, SW    = swa_FindSWRef.swa_FindSWRef (data, Info)
-    data, Info, SW    = swa_FindSWChannels.swa_FindSWChannels (data, Info, SW)
-    return SW
+
+def summarize_slow_waves(slow_waves, fs, signal_duration_seconds):
+    """Aggregate the event dictionaries returned by ``swa`` into scalar features.
+
+    Amplitudes and slopes retain the sign and units returned by ``swa``.
+    Durations and density are expressed in seconds and waves/minute, respectively.
+    """
+    if fs <= 0 or not np.isfinite(fs):
+        raise ValueError('fs must be a positive finite sampling frequency.')
+    if signal_duration_seconds <= 0 or not np.isfinite(signal_duration_seconds):
+        raise ValueError('signal_duration_seconds must be positive and finite.')
+
+    slow_waves = [] if slow_waves is None else list(slow_waves)
+    features = {name: np.nan for name in SLOW_WAVE_FEATURE_NAMES}
+    features['TotalSW'] = float(len(slow_waves))
+    features['SWdensity'] = float(len(slow_waves) / (signal_duration_seconds / 60.0))
+
+    for feature_prefix, event_field in _SLOW_WAVE_EVENT_FIELDS.items():
+        values = _finite_slow_wave_values(slow_waves, event_field)
+        if values.size:
+            features[f'{feature_prefix}_mean'] = float(np.mean(values))
+            features[f'{feature_prefix}_std'] = float(np.std(values))
+
+    durations = []
+    for wave in slow_waves:
+        try:
+            duration = (
+                float(np.asarray(wave['Ref_UpInd']).squeeze())
+                - float(np.asarray(wave['Ref_DownInd']).squeeze())
+            ) / float(fs)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if np.isfinite(duration) and duration > 0:
+            durations.append(duration)
+
+    if durations:
+        features['SWduration_mean'] = float(np.mean(durations))
+        features['SWduration_std'] = float(np.std(durations))
+
+    return features
+
+
+def get_SW_features(signal, fs, verbose=False):
+    """Detect slow waves with ``swa`` and return fixed-length scalar features."""
+    signal = np.asarray(signal, dtype=float).reshape(-1)
+    if fs <= 0 or not np.isfinite(fs):
+        raise ValueError('fs must be a positive finite sampling frequency.')
+    if signal.size == 0:
+        raise ValueError('signal must contain at least one sample.')
+    if not np.all(np.isfinite(signal)):
+        raise ValueError('signal must contain only finite values.')
+
+    info = swa_getInfoDefaults.swa_getInfoDefaults({}, 'SW', method='envelope')
+    info['Electrodes'] = ['EEG']
+    info['Recording'] = {'sRate': float(fs)}
+    info['Parameters']['Ref_InspectionPoint'] = 'ZC'
+    # Spatial clustering is undefined for a single-channel invocation.
+    info['Parameters']['Channels_ClusterTest'] = False
+
+    # swa consistently uses (channels, samples).
+    data = {'Raw': signal[np.newaxis, :]}
+    output_context = nullcontext() if verbose else redirect_stdout(io.StringIO())
+    with output_context:
+        data['SWRef'], info = swa_CalculateReference.swa_CalculateReference(
+            data['Raw'], info, False
+        )
+        data, info, slow_waves = swa_FindSWRef.swa_FindSWRef(data, info)
+        data, info, slow_waves = swa_FindSWChannels.swa_FindSWChannels(
+            data, info, slow_waves, flag_progress=verbose
+        )
+
+    return summarize_slow_waves(
+        slow_waves,
+        fs=float(fs),
+        signal_duration_seconds=signal.size / float(fs),
+    )
 
 def get_patient_profile(df_features):
     total_power = df_features.sum(axis=1)
