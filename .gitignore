@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Local dev working dirs (build_dev_subset.py outputs)
+dev_subset/
+dev_model/
+dev_outputs/
+
+# ML artifacts
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+models/
+checkpoints/
+runs/
+
+# Data
+*.csv.gz
+*.parquet
+*.feather
+data/
+datasets/
+raw/
+
+# Outputs
+output/
+outputs/
+results/
+logs/
+*.log
+
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.*
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+
+#measurment artifacts
+*.edf
+*.sav
+full_model/
+full_outputs/
+docker_model/
+dev_model/
+dev_outputs/
+dev_model_v2/
+dev_outputs_v2/
+features/FEATURES.md
+CLAUDE.md
+build_dev_subset.py
+learning_log.md
+learning_log_p2.md
+eda_outputs/
+docker_outputs/
+
+#files
+phase1_eda.py
+/loso_cv.py
+archive_outputs/
+eda/
+/tools

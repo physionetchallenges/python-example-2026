@@ -1,533 +1,406 @@
 #!/usr/bin/env python
 
-# Edit this script to add your team's code. Some functions are *required*, but you can edit most parts of the required functions,
-# change or remove non-required functions, and add your own functions.
+# Team Narnia — PhysioNet Challenge 2026
+# Entry 3: Added Platt-scaled calibration (CalibratedClassifierCV) and
+#          explicit threshold (0.12, tuned via loso_cv.py pooled sweep)
+#          replacing model.predict()'s default 0.5 cutoff.
+# Entry 4: Added AgeResidualizer pipeline step (2 new features:
+#          CA_rate_age_residual, EEG_var_REM_Wake_age_residual). Both were
+#          previously written off as uninformative but age-residualized EDA
+#          (2026-07-02) showed real signal masked by an age confound. Fit at
+#          train time only, applied identically at inference — see
+#          features/age_residuals.py. Feature count: 48 -> 50.
+# Entry 4 (fix, 2026-07-03): moved model-pipeline construction (XGBoost
+#          params, calibration, AgeResidualizer wiring) out of this file and
+#          into features/pipeline.py's build_pipeline(), shared with
+#          loso_cv.py. This closes a real bug where loso_cv.py had its own
+#          hand-copied Pipeline() that silently never got the AgeResidualizer
+#          step added here — LOSO was validating a stale 48-feature model
+#          while this file had already moved to 50. See features/pipeline.py
+#          for the full incident writeup.
+# Entry 5 (2026-07-10): FIRST LARGE-TRAINING-SET SUBMISSION. Switched
+#          model_family from XGBoost to logistic regression
+#          (build_logreg_pipeline, features/pipeline.py). Evidence: on the
+#          large training set, logreg's mean age-conditioned AUROC (0.6002,
+#          both folds independently) beats every XGBoost/CatBoost variant
+#          tested (all clustered ~0.544), a real (2.36 sigma) effect, not
+#          noise — see learning_log.md, 2026-07-06/07 model-family
+#          diagnostic entries. Reward is unaffected either way (all model
+#          families land in the same 0.072-0.076 band at large scale) — this
+#          switch costs nothing on the metric that matters most and gains
+#          real ground on the metric that was weaker.
+#          THRESHOLD changed 0.12 -> 0.10 to match: logreg's own pooled
+#          threshold sweep picked a DIFFERENT optimum than XGBoost's — do
+#          not carry XGBoost's tuned value over by habit.
+#          xgboost stays in requirements.txt: features/pipeline.py still
+#          imports XGBClassifier unconditionally at module level (build_pipeline()
+#          still exists, just unused by this file now), so the dependency
+#          doesn't go away just because this file stopped calling it.
+#          CAVEAT: this is the first-ever large-set submission. Every number
+#          above is a LOSO estimate — zero large-set leaderboard data points
+#          exist yet to confirm the LOSO->leaderboard transfer at this scale.
+#          Treat this submission itself as the calibration point, not a
+#          confirmed result.
+# Entry 6 (2026-07-19): Two independently-validated, compounding levers on
+#          top of the Entry 5 logreg pipeline — branch (a) feature work
+#          (NF1/NF2, time-of-night) and the age-banded threshold both closed
+#          with null/falsified results and are NOT reopened here (see
+#          learning_log_3, 2026-07-16 entries).
+#          1. C changed 0.01 -> 0.001 (build_logreg_pipeline's C= arg):
+#             reward +35% relative at 3-site LOSO, AUROC flat. Reproduced
+#             exactly across two independent Kaggle runs.
+#          2. Value-weighted sample weighting added at .fit() time, alpha=1.0
+#             (compute_value_weighted_sample_weights, features/
+#             sample_weighting.py — promoted from tools/reg_sweep.py, same
+#             shared-module precedent as AgeResidualizer): additional +12.9%
+#             relative reward on top of #1, AUROC still flat (max 0.21σ
+#             across all 3 folds). Reproduced bit-for-bit on an independent
+#             Kaggle run. train_model() has no fold rotation, so the weights
+#             are computed on the full training set passed in — this is
+#             itself the leakage-safe usage (see that function's docstring).
+#          Combined: +52% relative reward vs. the original shipped Entry 5
+#          baseline (0.1354 vs. 0.089 at 3-site LOSO), AUROC flat throughout
+#          the entire chain (0.6449 -> 0.6485 -> 0.6459, all within noise).
+#          THRESHOLD changed 0.10 -> 0.08 to match the new probability
+#          distribution's own pooled threshold sweep optimum.
+# Entry 7 (2026-07-19, TESTED BUT NOT SHIPPED): MCI-targeted sample
+#          weighting (compute_mci_boosted_weights, features/subtype_
+#          weighting.py), beta_mci=0.75 layered on top of Entry 6's
+#          alpha=1.0. Validated on its own: +5.6% relative reward, S0001
+#          AUROC flat, MCI sensitivity 76.8% -> 85.9% (tools/ablation_mci_
+#          sample_weight.py). Deliberately held back from Entry 8 below —
+#          both changes touch the sample-weighting layer, and shipping
+#          them together would make it impossible to attribute any
+#          outcome to either one individually (the exact ambiguity that
+#          made Entry 6's own regression so hard to diagnose). beta_mci
+#          =0.75 was also tuned against the 50-feature model, not Entry
+#          8's 39-feature one — the value would need re-validating against
+#          the new feature set, not carried over unchanged. features/
+#          subtype_weighting.py remains in the repo, unused by this file,
+#          for exactly that future re-test. See learning_log.md, 2026-
+#          07-19/20.
+# Entry 8 (2026-07-20): drops 11 SIGN-FLIPPING features — coefficients
+#          that changed direction depending on which 2 of the 3 training
+#          sites fit the model (features/feature_selection.py,
+#          STAGE1_DROP_FEATURES) — direct, measured evidence of site-
+#          specific overfitting, from the cross-fold coefficient analysis.
+#          Validated via tools/ablation_drop_signflip_features.py "Stage
+#          1": +8.2% relative reward, mean age-conditioned AUROC 0.6459 ->
+#          0.6711, ALL THREE LOSO folds improved simultaneously (not a
+#          mixed result), cross-fold spread shrank 0.1264 -> 0.1145 (more
+#          STABLE, not just better on average — the specific signature
+#          this theory predicted). Reproduced bit-for-bit across an
+#          independent Kaggle kernel restart. THRESHOLD changed 0.08 ->
+#          0.10 to match this config's own pooled reward-sweep optimum
+#          (t=0.10 gave best reward 0.1434, vs. the prior t=0.08's 0.1325
+#          on the unchanged 50-feature model) — same "re-tune the
+#          threshold for the new probability distribution, don't carry
+#          the old value over" discipline as every prior threshold change.
+#          Stage 2 of that same ablation (also dropping CA_rate_age_
+#          residual and Race_Black/White/Asian) scored higher still and
+#          clears the pre-committed 1.0-sigma gate outright — deliberately
+#          NOT included here. CA_rate_age_residual carries its own Entry 4
+#          validation history; the Race_* features carry real, documented
+#          demographic signal that coefficient instability alone doesn't
+#          invalidate. Both deserve separate, specific justification
+#          before being dropped — not bundled in just because Stage 1
+#          worked. See features/feature_selection.py header and
+#          learning_log.md, 2026-07-20, for the full reasoning.
+#
+# See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
 ################################################################################
-#
-# Optional libraries, functions, and variables. You can change or remove them.
-#
+# Libraries
 ################################################################################
 
 import joblib
 import numpy as np
 import os
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-import sys
 from tqdm import tqdm
 
 from helper_code import *
 
+# Feature modules
+from features.demographic        import extract_demographic_features
+from features.caisr_base         import extract_caisr_base_features
+from features.caisr_enriched     import extract_caisr_enriched_features
+from features.physiological_ratios import (extract_physiological_ratio_features,
+                                            N_RATIO_FEATURES)
+from features.human              import extract_human_annotations_features
+from features.pipeline           import build_logreg_pipeline
+from features.sample_weighting   import compute_value_weighted_sample_weights
+from features.feature_selection  import FeatureDropper, STAGE1_DROP_FEATURES
+from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
+                      N_DEMOGRAPHIC_FEATURES, IDX_AGE)
+
+from sklearn.pipeline import Pipeline
+
 ################################################################################
-# Path & Constant Configuration (Added for Robustness)
+# Configuration
 ################################################################################
 
-# Get the absolute directory where this script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Build the absolute path to the CSV file relative to the script location
+SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
 
+# Fallback sizes for missing files
+_N_BASE     = N_CAISR_BASE_FEATURES      # 12
+_N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
+_N_RATIO    = N_RATIO_FEATURES           # 15
+
+# Entry 8 — new pooled reward-sweep optimum for the 39-feature (Stage 1
+# sign-flip features dropped) probability distribution. Confirmed via
+# tools/ablation_drop_signflip_features.py: reward peaks at t=0.10
+# (0.1434) — a different optimum than the prior 50-feature model's
+# t=0.08, because dropping features reshapes the calibrated output, not
+# just the ranking. See learning_log.md, 2026-07-20.
+#verified THRESHOLD
+THRESHOLD = 0.10
+
+# Entry 6 — value-weighted sample-weighting boost applied at .fit() time
+# (compute_value_weighted_sample_weights, features/sample_weighting.py).
+# alpha=1.0 is the validated, reproduced value — do not change without a
+# new sweep + reproduction run, same discipline as C and THRESHOLD above.
+SAMPLE_WEIGHT_ALPHA = 1.0
+
 ################################################################################
-#
-# Required functions. Edit these functions to add your code, but do not change the arguments for the functions.
-#
+# Required functions
 ################################################################################
 
-# Train your models. This function is *required*. You should edit this function to add your code, but do *not* change the arguments
-# of this function. If you do not train one of the models, then you can return None for the model.
-
-# Train your model.
 def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
-    # Find the data files.
     if verbose:
         print('Finding the Challenge data...')
 
-    patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
+    patient_data_file     = os.path.join(data_folder, DEMOGRAPHICS_FILE)
     patient_metadata_list = find_patients(patient_data_file)
-    num_records = len(patient_metadata_list)
+    num_records           = len(patient_metadata_list)
 
     if num_records == 0:
         raise FileNotFoundError('No data were provided.')
 
-    # Extract the features and labels from the data.
     if verbose:
         print('Extracting features and labels from the data...')
 
-    # Iterate over the records to extract the features and labels.
-    features = list()
-    labels = list()
-    
-    pbar = tqdm(range(num_records), desc="Extracting Features", unit="record", disable=not verbose)
+    features = []
+    labels   = []
+
+    pbar = tqdm(range(num_records), desc='Extracting Features',
+                unit='record', disable=not verbose)
     for i in pbar:
         try:
-            # Extract identifiers for this specific record
-            record = patient_metadata_list[i]
+            record     = patient_metadata_list[i]
             patient_id = record[HEADERS['bids_folder']]
             site_id    = record[HEADERS['site_id']]
             session_id = record[HEADERS['session_id']]
 
             if verbose:
-                pbar.set_postfix({"patient": patient_id})
+                pbar.set_postfix({'patient': patient_id})
 
-            # Load the patient data.
-            patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-            patient_data = load_demographics(patient_data_file, patient_id, session_id)
-            demographic_features = extract_demographic_features(patient_data)
+            # ── Demographics ─────────────────────────────────────────────────
+            demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
+            patient_data = load_demographics(demo_file, patient_id, session_id)
+            demo_f = extract_demographic_features(patient_data)
 
-            # Load signal data.
-
-            # Load the physiological signal.
-            physiological_data_file = os.path.join(data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}.edf")
-            # --- Check if the file actually exists before proceeding ---
-            if not os.path.exists(physiological_data_file):
+            # ── Physiological EDF ─────────────────────────────────────────────
+            phys_file = os.path.join(
+                data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER,
+                site_id, f'{patient_id}_ses-{session_id}.edf')
+            if not os.path.exists(phys_file):
                 if verbose:
-                    print(f"  ! Missing physiological data for {patient_id}. Skipping...")
-                continue # skip record
-            physiological_data, physiological_fs = load_signal_data(physiological_data_file)
-            physiological_features = extract_physiological_features(physiological_data, physiological_fs, csv_path=csv_path) # This function can rename, re-reference, resample, etc. the signal data.
+                    tqdm.write(
+                        f'  ! Missing physiological EDF for {patient_id} — skipping.')
+                continue
+            phys_data, phys_fs = load_signal_data(phys_file)
 
-            # Load the algorithmic annotations.
-            algorithmic_annotations_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
-            algorithmic_annotations, algorithmic_fs = load_signal_data(algorithmic_annotations_file)
-            algorithmic_features = extract_algorithmic_annotations_features(algorithmic_annotations)
+            # ── CAISR Annotations ─────────────────────────────────────────────
+            algo_file = os.path.join(
+                data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
+                site_id, f'{patient_id}_ses-{session_id}_caisr_annotations.edf')
+            if os.path.exists(algo_file):
+                algo_data, _ = load_signal_data(algo_file)
+                caisr_base     = extract_caisr_base_features(algo_data)
+                caisr_enriched = extract_caisr_enriched_features(algo_data)
+                # Ratio features require BOTH phys + CAISR
+                ratio_f = extract_physiological_ratio_features(
+                    phys_data, phys_fs, algo_data, csv_path=csv_path)
+            else:
+                tqdm.write(
+                    f'Error loading EDF file: [Errno 2] No such file or directory: '
+                    f"'{algo_file}'")
+                caisr_base     = np.full(_N_BASE,     float('nan'))
+                caisr_enriched = np.full(_N_ENRICHED, float('nan'))
+                ratio_f        = np.full(_N_RATIO,    float('nan'))
 
-            # Load the human annotations; these data will not be available in the hidden validation and test sets.
-            human_annotations_file = os.path.join(data_folder, HUMAN_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_expert_annotations.edf")
-            human_annotations, human_fs = load_signal_data(human_annotations_file)
-            human_features = extract_human_annotations_features(human_annotations)
+            # ── Human Annotations (training only — not used in model) ─────────
+            human_file = os.path.join(
+                data_folder, HUMAN_ANNOTATIONS_SUBFOLDER,
+                site_id, f'{patient_id}_ses-{session_id}_expert_annotations.edf')
+            if os.path.exists(human_file):
+                human_data, _ = load_signal_data(human_file)
+                _ = extract_human_annotations_features(human_data)
 
-            # Load the diagnoses; these data will not be available in the hidden validation and test sets.
-            diagnosis_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-            label = load_diagnoses(diagnosis_file, patient_id)
+            # ── Label ─────────────────────────────────────────────────────────
+            label = load_diagnoses(
+                os.path.join(data_folder, DEMOGRAPHICS_FILE), patient_id)
 
-            # Store the features and labels, but the human annotations are not available on the hidden validation and test sets.
             if label == 0 or label == 1:
-                features.append(np.hstack([demographic_features, physiological_features, algorithmic_features]))
+                # 48-feature extraction vector. AgeResidualizer (pipeline
+                # step, Entry 4) appends the 2 age-residualized features
+                # at model.fit() time — do not hstack them here.
+                features.append(np.hstack([
+                    demo_f,
+                    caisr_base,
+                    caisr_enriched,
+                    ratio_f,
+                ]))
                 labels.append(label)
 
-            if 'physiological_data' in locals():
-                del physiological_data
-            if 'algorithmic_annotations' in locals():
-                del algorithmic_annotations
+            if 'phys_data'  in locals(): del phys_data
+            if 'algo_data'  in locals(): del algo_data
+            if 'human_data' in locals(): del human_data
 
         except Exception as e:
-            # If an error occurs (e.g., a record is corrupted), log it and move to the next
-            tqdm.write(f"  !!! Error processing record {i+1} ({patient_id}): {e}")
+            tqdm.write(f'  !!! Error on record {i+1} ({patient_id}): {e}')
             continue
 
     pbar.close()
 
     features = np.asarray(features, dtype=np.float32)
-    labels = np.asarray(labels, dtype=bool)
+    labels   = np.asarray(labels,   dtype=bool)
 
-    # Train the models on the features.
     if verbose:
-        print('Training the model on the data...')
+        n_pos = int(labels.sum())
+        n_neg = int((~labels).sum())
+        print(f'Training on {len(labels)} patients '
+              f'({n_pos} positive, {n_neg} negative)...')
+        print(f'Feature vector shape: {features.shape}')
 
-    # This very simple model trains a random forest model with very simple features.
+    # ── Model pipeline (Entry 8: logreg, C=0.001, value-weighted sample
+    #    weighting at alpha=1.0, calibrated, AgeResidualizer on, Stage 1
+    #    sign-flip features dropped) ───────────────────────────────────────
+    # Built via features/pipeline.py's build_logreg_pipeline() — the same
+    # shared definition loso_cv.py/reg_sweep.py uses, so the validation
+    # harness and this submission can never silently diverge on what "the
+    # model" is (see features/pipeline.py header for the incident that
+    # motivated this discipline in the first place). C=0.001 and alpha=1.0
+    # are both independently reproduced on Kaggle (see learning_log_3,
+    # 2026-07-16 entries) — do not change either without a fresh
+    # reproduction run.
+    #
+    # FeatureDropper (features/feature_selection.py) is inserted
+    # immediately after 'age_residual' and before 'imputer' — it MUST sit
+    # there, not earlier, so AgeResidualizer's own source features (e.g.
+    # CA_rate, used to compute CA_rate_age_residual, which is KEPT here)
+    # are still present when AgeResidualizer runs, even though the raw
+    # CA_rate column itself is one of the 11 dropped. Do not reorder these
+    # steps.
+    _base_model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
+    model = Pipeline(
+        [_base_model.steps[0], ('feature_dropper', FeatureDropper(STAGE1_DROP_FEATURES))]
+        + _base_model.steps[1:]
+    )
 
-    # Define the parameters for the random forest classifier and regressor.
-    n_estimators = 12  # Number of trees in the forest.
-    max_leaf_nodes = 34  # Maximum number of leaf nodes in each tree.
-    random_state = 56  # Random state; set for reproducibility.
-    
-    # Created a Pipeline wrapping SimpleImputer and RandomForestClassifier.
-    # This automatically injects median values for any missing data (NaN) during both fit() and predict() calls.
-    rf = RandomForestClassifier(
-        n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state)
-        
-    model = Pipeline([
-        ('imputer', SimpleImputer(strategy='median')),
-        ('classifier', rf)
-    ])
+    # train_model() has no fold rotation — it trains once on whatever
+    # training set the organizers provide — so computing the weights on
+    # the full `labels`/age_train passed in here IS the leakage-safe usage
+    # (see compute_value_weighted_sample_weights' docstring for why this
+    # differs from reg_sweep.py's per-LOSO-fold call, which only ever sees
+    # that fold's training split).
+    age_train = features[:, IDX_AGE]
+    sample_weight = compute_value_weighted_sample_weights(
+        labels, age_train, alpha=SAMPLE_WEIGHT_ALPHA)
 
-    # Fit the model.
-    model.fit(features, labels)
+    # 'classifier' is build_logreg_pipeline's final step name — sklearn's
+    # Pipeline routes fit_params via the 'stepname__paramname' convention.
+    # CalibratedClassifierCV.fit() accepts and forwards sample_weight to
+    # the wrapped LogisticRegression. (2026-07-16 incident: a leftover
+    # duplicate unweighted .fit() call was caught and removed during
+    # implementation on Kaggle — it would have silently discarded the
+    # weighting entirely with zero errors raised. There is only ONE .fit()
+    # call below; keep it that way.)
+    model.fit(features, labels, classifier__sample_weight=sample_weight)
 
-    # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
-
-    # Save the model.
     save_model(model_folder, model)
 
     if verbose:
         print('Done.')
         print()
 
-# Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
-# arguments of this function. If you do not train one of the models, then you can return None for the model.
-def load_model(model_folder, verbose):
-    model_filename = os.path.join(model_folder, 'model.sav')
-    model = joblib.load(model_filename)
-    return model
 
-# Run your trained model. This function is *required*. You should edit this function to add your code, but do *not* change the
-# arguments of this function.
+def load_model(model_folder, verbose):
+    return joblib.load(os.path.join(model_folder, 'model.sav'))
+
+
 def run_model(model, record, data_folder, verbose):
-    # Load the model.
     model = model['model']
 
-    # Extract identifiers from the record dictionary
     patient_id = record[HEADERS['bids_folder']]
     site_id    = record[HEADERS['site_id']]
     session_id = record[HEADERS['session_id']]
 
-    # Load the patient data.
-    patient_data_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-    patient_data = load_demographics(patient_data_file, patient_id, session_id)
-    demographic_features = extract_demographic_features(patient_data)
+    # ── Demographics ──────────────────────────────────────────────────────────
+    demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
+    patient_data = load_demographics(demo_file, patient_id, session_id)
+    demo_f = extract_demographic_features(patient_data)
 
-    # Load the signal data.
-    phys_file = os.path.join(data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}.edf")
+    # ── Physiological EDF ─────────────────────────────────────────────────────
+    phys_file = os.path.join(
+        data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER,
+        site_id, f'{patient_id}_ses-{session_id}.edf')
+    phys_data = phys_fs = None
     if os.path.exists(phys_file):
         phys_data, phys_fs = load_signal_data(phys_file)
-        # Ensure csv_path is accessible or defined
-        physiological_features = extract_physiological_features(phys_data, phys_fs)
-    else:
-        physiological_features = np.full(49, float('nan')) # Fallback if signal data does not exist
 
-    # Load the algorithmic annotations.
-    algo_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
+    # ── CAISR Annotations ─────────────────────────────────────────────────────
+    algo_file = os.path.join(
+        data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
+        site_id, f'{patient_id}_ses-{session_id}_caisr_annotations.edf')
     if os.path.exists(algo_file):
         algo_data, _ = load_signal_data(algo_file)
-        algorithmic_features = extract_algorithmic_annotations_features(algo_data)
+        caisr_base     = extract_caisr_base_features(algo_data)
+        caisr_enriched = extract_caisr_enriched_features(algo_data)
+        if phys_data is not None:
+            ratio_f = extract_physiological_ratio_features(
+                phys_data, phys_fs, algo_data)
+        else:
+            ratio_f = np.full(_N_RATIO, float('nan'))
     else:
-        algorithmic_features = np.full(12, float('nan')) # Fallback if algorithmic annotations do not exist
+        caisr_base     = np.full(_N_BASE,     float('nan'))
+        caisr_enriched = np.full(_N_ENRICHED, float('nan'))
+        ratio_f        = np.full(_N_RATIO,    float('nan'))
 
-    features = np.hstack([demographic_features, physiological_features, algorithmic_features]).reshape(1, -1)
+    # NOTE: this is the 48-feature extraction vector (demo/base/enriched/
+    # ratios). The loaded `model` pipeline's age_residual step appends the
+    # 2 Entry 4 age-residualized features automatically — do not hstack
+    # them here, and do not hardcode 50 anywhere in this function.
+    features = np.hstack([
+        demo_f,
+        caisr_base,
+        caisr_enriched,
+        ratio_f,
+    ]).reshape(1, -1)
 
-    # Apply the model to the features.
-    binary_output = model.predict(features)[0]
+    # ── Entry 8: calibrated probability + explicit threshold ──────────────────
+    # model.predict_proba() is already calibrated — calibration is baked into
+    # the pipeline itself (see train_model()). model.predict() is NOT used
+    # here: its default 0.5 cutoff is far too conservative for the reward
+    # metric at low local prevalence (this was Entry 1/2's mistake — reward
+    # 0.011 despite reasonable AUROC). THRESHOLD is set from tools/ablation_
+    # drop_signflip_features.py's pooled reward sweep for the 39-feature
+    # (Stage 1 dropped) probability distribution specifically (t=0.10) — not
+    # carried over from Entry 6's t=0.08, since dropping features reshapes
+    # the calibrated output, not just the ranking.
     probability_output = model.predict_proba(features)[0][1]
+    binary_output       = int(probability_output > THRESHOLD)
 
     return binary_output, probability_output
 
+
 ################################################################################
-#
-# Optional functions. You can change or remove these functions and/or add new functions.
-#
+# Utilities
 ################################################################################
 
-def extract_demographic_features(data):
-    """
-    Extracts and encodes demographic features from a metadata dictionary.
-    
-    Inputs:
-        data (dict): A dictionary containing patient metadata (e.g., from a CSV row).
-    
-    Returns:
-        np.array: A feature vector of length 11:
-            - [0]: Age (Continuous)
-            - [1:4]: Sex (One-hot: Female, Male, Other/Unknown)
-            - [4:9]: Race (One-hot: Asian, Black, Other, Unavailable, White)
-            - [9]: BMI (Continuous)
-    """
-    # 1. Age
-    age = load_age(data)
-    age = np.array([age])
-
-    # 2. Sex feature (one-hot encoding for Female, Male, Other/Unknown)
-    # Uses lowercase prefix matching to handle variants like 'F', 'Female', 'M', or 'Male'
-    sex = load_sex(data, standardize=True)
-    sex_vec = np.zeros(3)
-    if sex == 'Female': 
-        sex_vec[0] = 1 # Index 0: Female
-    elif sex == 'Male': 
-        sex_vec[1] = 1 # Index 1: Male
-    else: 
-        sex_vec[2] = 1 # Index 2: Other/Unknown
-
-    # 3. Race One-Hot Encoding (5 dimensions)
-    # Standardizes the raw text into one of five categories using the helper function
-    race = load_race(data, standardize=True)
-    race_vec = np.zeros(5)
-    # Pre-defined mapping for index consistency
-    if race == 'Asian':
-        race_vec[0] = 1
-    elif race == 'Black':
-        race_vec[1] = 1
-    elif race == 'Others':
-        race_vec[2] = 1
-    elif race == 'Unavailable':
-        race_vec[3] = 1
-    elif race == 'White':
-        race_vec[4] = 1
-    else:
-        race_vec[2] = 1 # Default to 'Others' for any unrecognized
-
-    # 4. Body mass index (BMI)
-    bmi = load_bmi(data)
-    bmi = np.array([bmi])
-
-    # 5. Concatenate all components into a single vector (1 + 3 + 5 + 1 = 10)
-    
-    return np.concatenate([age, sex_vec, race_vec, bmi])
-
-
-def extract_physiological_features(physiological_data, physiological_fs, csv_path=DEFAULT_CSV_PATH):
-    """
-    Standardizes channels and extracts statistical/spectral features.
-    """
-    original_labels = list(physiological_data.keys())
-
-    # Step 1: Load rules and standardize names
-    # Note: Use script-relative path or absolute path for robustness
-    rename_rules = load_rename_rules(os.path.abspath(csv_path))
-    rename_map, cols_to_drop = standardize_channel_names_rename_only(original_labels, rename_rules)
-
-    # Step 2: Apply renaming to BOTH signals and their corresponding FS
-    processed_channels = {}
-    processed_fs = {}
-    for old_label, data in physiological_data.items():
-        if old_label in cols_to_drop:
-            continue
-        new_label = rename_map.get(old_label, old_label.lower())
-        processed_channels[new_label] = data
-        # Mapping the sampling rate to the new label
-        if old_label in physiological_fs:
-            processed_fs[new_label] = physiological_fs[old_label]
-        else:
-            # Report error and stop if no FS is found for a kept channel
-            raise KeyError(f"Sampling frequency (fs) not found for channel '{old_label}' ")
-        
-    if 'physiological_data' in locals(): del physiological_data
-
-    # Step 3: Construct Bipolar Derivations
-    bipolar_configs = [
-        ('f3-m2', 'f3', ['m2']), ('f4-m1', 'f4', ['m1']),
-        ('c3-m2', 'c3', ['m2']), ('c4-m1', 'c4', ['m1']),
-        ('o1-m2', 'o1', ['m2']), ('o2-m1', 'o2', ['m1']),
-        ('e1-m2', 'e1', ['m2']), ('e2-m1', 'e2', ['m1']),
-        ('chin1-chin2', 'chin 1', ['chin 2']),
-        ('lat', 'lleg+', ['lleg-']), ('rat', 'rleg+', ['rleg-'])
-    ]
-
-    for target, pos, neg_list in bipolar_configs:
-        # 1. Skip if target already exists or pos channel missing
-        if target in processed_channels or pos not in processed_channels:
-            continue
-        
-        # 2. Check all neg channels exist
-        if not all(n in processed_channels for n in neg_list):
-            continue
-
-        # 3. Check sampling rate consistency
-        all_involved = [pos] + neg_list
-        fs_values = [processed_fs[ch] for ch in all_involved]
-        
-        if len(set(fs_values)) > 1:
-            raise ValueError(f"Sampling rate mismatch for {target}: {dict(zip(all_involved, fs_values))}")
-
-        # 4. Derive bipolar signal
-        ref_sig = processed_channels[neg_list[0]] if len(neg_list) == 1 else tuple(processed_channels[n] for n in neg_list)
-        
-        derived = derive_bipolar_signal(processed_channels[pos], ref_sig)
-        
-        if derived is not None:
-            processed_channels[target] = derived
-            processed_fs[target] = processed_fs[pos]
-
-    leads_to_check = {
-        'eeg':  ['f3-m2', 'f4-m1', 'c3-m2', 'c4-m1'],
-        'eog':  ['e1-m2', 'e2-m1'],
-        'chin': ['chin1-chin2', 'chin'],
-        'leg':  ['lat', 'rat'],
-        'ecg':  ['ecg', 'ekg'],
-        'resp': ['airflow', 'ptaf', 'abd', 'chest'],
-        'spo2': ['spo2', 'sao2'] # Added sao2 as fallback for spo2
-    }
-    
-    final_features = []
-    for lead_type, candidates in leads_to_check.items():
-        sig = None
-        fs = None
-        
-        # Identify the first available candidate
-        for candidate in candidates:
-            if candidate in processed_channels and processed_channels[candidate] is not None:
-                sig = processed_channels[candidate]
-                fs = processed_fs.get(candidate)
-                break 
-
-        if sig is not None and len(sig) > 1:
-            # --- Time Domain Features (Very Fast) ---
-            std_val = np.std(sig)
-            mav_val = np.mean(np.abs(sig))
-            
-            # Zero Crossing Rate (Proxy for frequency/slowing)
-            zcr = np.mean(np.diff(np.sign(sig)) != 0)
-            
-            # Root Mean Square
-            rms = np.sqrt(np.mean(sig**2))
-            
-            # Signal Activity (Variance)
-            activity = np.var(sig)
-            
-            # Mobility (Hjorth Parameter) - Proxy for mean frequency
-            # sqrt(var(diff(sig)) / var(sig))
-            diff_sig = np.diff(sig)
-            mobility = np.sqrt(np.var(diff_sig) / activity) if activity > 0 else 0.0
-
-            # Complexity (Hjorth Parameter) - Proxy for bandwidth
-            diff2_sig = np.diff(diff_sig)
-            var_d2 = np.var(diff2_sig)
-            var_d1 = np.var(diff_sig)
-            complexity = (np.sqrt(var_d2 / var_d1) / mobility) if (var_d1 > 0 and mobility > 0) else 0.0
-
-            final_features.extend([std_val, mav_val, zcr, rms, activity, mobility, complexity])
-
-        else:
-            # Padding: 7 features per lead type
-            final_features.extend([float('nan')] * 7)
-
-    if 'processed_channels' in locals(): del processed_channels
-
-    return np.array(final_features)
-
-def extract_algorithmic_annotations_features(algo_data):
-    """
-    Extracts sleep architecture and event density features from CAISR outputs.
-    Output vector length: 12
-    """
-    if not algo_data:
-        return np.full(12, float('nan'))
-
-    features = []
-
-    # --- 1. Respiratory & Arousal Event Densities ---
-    # Total duration in hours (assuming 1Hz for event traces)
-    # If the signal exists, we calculate events per hour (Index)
-    total_hours = len(algo_data.get('resp_caisr', [])) / 3600.0
-    
-    def count_discrete_events(key):
-        if key not in algo_data or total_hours <= 0:
-            return float('nan')
-        
-        sig = algo_data[key].astype(float)
-        # Create a binary mask: 1 if there is an event, 0 if not
-        binary_sig = (sig > 0).astype(int)
-        
-        # Detect rising edges: 0 to 1 transition
-        # diff will be 1 at the start of an event, -1 at the end
-        diff = np.diff(binary_sig, prepend=0)
-        num_events = np.count_nonzero(diff == 1)
-        
-        return num_events / total_hours
-    
-    ahi_auto = count_discrete_events('resp_caisr')      # Automated Apnea-Hypopnea Index
-    arousal_auto = count_discrete_events('arousal_caisr') # Automated Arousal Index
-    limb_auto = count_discrete_events('limb_caisr')    # Automated Limb Movement Index
-    
-    features.extend([ahi_auto, arousal_auto, limb_auto])
-
-    # --- 2. Sleep Architecture (from stage_caisr) ---
-    # Standard labels: 5=W, 4=R, 3=N1, 2=N2, 1=N3 (or similar mapping)
-    stages = algo_data.get('stage_caisr', np.array([]))
-    # Filter out invalid/background values (like the 9.0 in your sample)
-    valid_stages = stages[stages < 9.0]
-    
-    if len(valid_stages) > 0:
-        total_epochs = len(valid_stages)
-        # Percentage of each stage
-        w_pct = np.mean(valid_stages == 5)
-        r_pct = np.mean(valid_stages == 4)
-        n1_pct = np.mean(valid_stages == 3)
-        n2_pct = np.mean(valid_stages == 2)
-        n3_pct = np.mean(valid_stages == 1)
-        
-        # Sleep Efficiency: (N1+N2+N3+R) / Total
-        efficiency = np.mean((valid_stages >= 1) & (valid_stages <= 4))
-    else:
-        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = float('nan')
-
-    features.extend([w_pct, n1_pct, n2_pct, n3_pct, r_pct, efficiency])
-
-    # --- 3. Model Confidence / Uncertainty ---
-    # Mean probability of Wake and REM (indicators of sleep stability)
-    # We use the raw probability traces
-    prob_w = np.mean(algo_data.get('caisr_prob_w', [float('nan')]))
-    prob_n3 = np.mean(algo_data.get('caisr_prob_n3', [float('nan')]))
-    prob_arous = np.mean(algo_data.get('caisr_prob_arous', [float('nan')]))
-    
-    # Standardize '9.0' or other filler values to NaN
-    clean_prob = lambda x: x if x < 1.0 else float('nan')
-    features.extend([clean_prob(prob_w), clean_prob(prob_n3), clean_prob(prob_arous)])
-
-    return np.array(features)
-
-def extract_human_annotations_features(human_data):
-    """
-    Extracts features from expert-scored human annotations.
-    Output vector length: 12 (to match algorithmic feature length)
-    """
-    # If data is missing (common in hidden test sets), return a zero vector
-    if not human_data or 'resp_expert' not in human_data:
-        return np.full(12, float('nan'))
-
-    features = []
-
-    # --- 1. Human Event Indices (Events per Hour) ---
-    # Total duration in hours based on 1Hz signal
-    total_seconds = len(human_data.get('resp_expert', []))
-    total_hours = total_seconds / 3600.0
-    
-    def count_discrete_events(key):
-        if key not in human_data or total_hours <= 0:
-            return float('nan')
-        sig = (human_data[key] > 0).astype(int)
-        # Identify the start of each continuous event block
-        diff = np.diff(sig, prepend=0)
-        return np.count_nonzero(diff == 1) / total_hours
-
-    ahi_human = count_discrete_events('resp_expert')      # Human AHI
-    arousal_human = count_discrete_events('arousal_expert') # Human Arousal Index
-    limb_human = count_discrete_events('limb_expert')       # Human PLMI
-    
-    features.extend([ahi_human, arousal_human, limb_human])
-
-    # --- 2. Human Sleep Architecture ---
-    # Standard labels: 0=W, 1=N1, 2=N2, 3=N3, 4=R, 5=Unknown/Movement
-    stages = human_data.get('stage_expert', np.array([]))
-    
-    # Filter out label 5 (often used by experts for movement/unscored)
-    valid_mask = (stages < 9.0)
-    valid_stages = stages[valid_mask]
-    
-    if len(valid_stages) > 0:
-        w_pct = np.mean(valid_stages == 5)
-        r_pct = np.mean(valid_stages == 4)
-        n1_pct = np.mean(valid_stages == 3)
-        n2_pct = np.mean(valid_stages == 2)
-        n3_pct = np.mean(valid_stages == 1)
-        efficiency = np.mean(valid_stages > 0)
-    else:
-        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = float('nan')
-
-    features.extend([w_pct, n1_pct, n2_pct, n3_pct, r_pct, efficiency])
-
-    # --- 3. Fragmentation & Stability (Replacing Probabilities) ---
-    # These metrics quantify how "broken" the sleep is, which is a key marker.
-    if len(valid_stages) > 1:
-        # Number of stage transitions
-        transitions = np.count_nonzero(np.diff(valid_stages)) / total_hours
-        # Wake After Sleep Onset (WASO) proxy: non-zero stages followed by zero
-        waso_minutes = (np.count_nonzero(valid_stages == 0) * 30) / 60.0
-        # REM Latency (epochs until first REM)
-        rem_indices = np.where(valid_stages == 4)[0]
-        rem_latency = rem_indices[0] if len(rem_indices) > 0 else float('nan')
-    else:
-        transitions = waso_minutes = rem_latency = float('nan')
-
-    features.extend([transitions, waso_minutes, rem_latency])
-
-    return np.array(features)
-
-
-# Save your trained model.
 def save_model(model_folder, model):
-    d = {'model': model}
-    filename = os.path.join(model_folder, 'model.sav')
-    joblib.dump(d, filename, protocol=0)
+    joblib.dump({'model': model},
+                os.path.join(model_folder, 'model.sav'),
+                protocol=0)

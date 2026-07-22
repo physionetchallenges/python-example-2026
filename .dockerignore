@@ -1,0 +1,68 @@
+# Git
+.git/
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# ML artifacts
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+models/
+checkpoints/
+runs/
+
+# Data (large files not needed at build time)
+*.csv.gz
+*.parquet
+*.feather
+data/
+datasets/
+raw/
+
+# Outputs
+output/
+outputs/
+results/
+logs/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.*
+
+# Docs
+README.md
+LICENSE
