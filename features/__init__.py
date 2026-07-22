@@ -13,11 +13,24 @@
 # module called from team_code.py's extraction block, so they live at the
 # end of the vector rather than inside the demo/base/enriched/ratio blocks.
 # Feature count: 48 → 50.
+#
+# NEW candidate, not yet validated (2026-07-20): Added 3 stage-conditional
+# limb movement features (Limb_REM, Limb_NREM, Limb_REM_NREM_ratio) via
+# features/caisr_enriched.py — same enrichment pattern already proven for
+# AHI (REM_AHI/NREM_AHI/REM_NREM_AHI_ratio), applied to Limb_idx instead.
+# Appended at the END of the enriched block (after N3_entropy, before the
+# ratio block starts) — inserted, not appended to the whole vector, so
+# downstream index constants that are defined relative to IDX_RATIO_START
+# (e.g. IDX_EEG_VAR_REM_WAKE below) auto-update correctly; nothing already
+# shipped needs a manual index bump. Feature count: 50 → 53 (raw 48 → 51,
+# plus the same 2 age-residual features as before). Requires regenerating
+# any --features-cache built before this change — the raw hstack length
+# changed from 48 to 51.
 
 
 N_DEMOGRAPHIC_FEATURES     = 10   # features/demographic.py
 N_CAISR_BASE_FEATURES      = 12   # features/caisr_base.py
-N_CAISR_ENRICHED_FEATURES  = 11   # features/caisr_enriched.py
+N_CAISR_ENRICHED_FEATURES  = 14   # features/caisr_enriched.py (was 11 — +3 limb features, 2026-07-20)
 N_RATIO_FEATURES           = 15   # features/physiological_ratios.py
 N_AGE_RESIDUAL_FEATURES    = 2    # features/age_residuals.py (Entry 4, pipeline-appended)
 
@@ -59,6 +72,7 @@ FEATURE_NAMES_48 = [
     'OA_rate', 'CA_rate', 'HY_rate', 'RERA_rate', 'CA_total_ratio',
     'REM_AHI', 'NREM_AHI', 'REM_NREM_AHI_ratio', 'N3_gradient',
     'Spont_arousal_idx', 'N3_entropy',
+    'Limb_REM', 'Limb_NREM', 'Limb_REM_NREM_ratio',
     'EEG_std_N3_Wake', 'EEG_mav_N3_Wake', 'EEG_zcr_N3_Wake', 'EEG_rms_N3_Wake',
     'EEG_var_N3_Wake', 'EEG_mob_N3_Wake', 'EEG_cplx_N3_Wake',
     'EEG_std_REM_Wake', 'EEG_mav_REM_Wake', 'EEG_zcr_REM_Wake', 'EEG_rms_REM_Wake',

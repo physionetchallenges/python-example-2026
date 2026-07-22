@@ -356,11 +356,20 @@ def run_fold(holdout_site, features, labels, ages, sites, patient_ids,
 
 
 def run_ablation(holdout_site, features, labels, ages, sites):
+    # Derived from features/__init__.py's IDX_* constants rather than
+    # hardcoded — this exact dict went stale silently when caisr_enriched.py
+    # grew from 11 to 14 features (2026-07-20 limb enrichment) and would
+    # have kept reporting a group ablation against the WRONG 11 columns
+    # with no error raised. Same class of bug pipeline.py's header
+    # documents for loso_cv.py's old hand-copied Pipeline() — one
+    # canonical source, not a second hand-maintained copy.
+    from features import (IDX_DEMO_START, IDX_DEMO_END, IDX_BASE_START, IDX_BASE_END,
+                           IDX_ENRICHED_START, IDX_ENRICHED_END, IDX_RATIO_START, IDX_RATIO_END)
     GROUPS = {
-        'demo':           list(range(0,  10)),
-        'caisr_base':     list(range(10, 22)),
-        'caisr_enriched': list(range(22, 33)),
-        'ratios':         list(range(33, 48)),
+        'demo':           list(range(IDX_DEMO_START,     IDX_DEMO_END)),
+        'caisr_base':     list(range(IDX_BASE_START,     IDX_BASE_END)),
+        'caisr_enriched': list(range(IDX_ENRICHED_START, IDX_ENRICHED_END)),
+        'ratios':         list(range(IDX_RATIO_START,    IDX_RATIO_END)),
     }
 
     train_mask = sites != holdout_site

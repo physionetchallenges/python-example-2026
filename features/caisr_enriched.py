@@ -1,10 +1,16 @@
 # features/caisr_enriched.py
-# Enriched CAISR annotation features — features 71-81
+# Enriched CAISR annotation features — features 71-81 (v1), extended to
+# 71-84 (v5, 2026-07-20) with stage-conditional limb movement features
 #
 # Iteration history:
 #   v1 (2026-06-30): First enrichment pass — respiratory breakdown,
 #                    stage-conditional AHI, N3 gradient, spontaneous
 #                    arousal index, N3 confidence entropy  [11 features]
+#   v5 (2026-07-20): Added Limb_REM, Limb_NREM, Limb_REM_NREM_ratio —
+#                    stage-conditional limb movement index, same pattern
+#                    as v1's REM_AHI/NREM_AHI/REM_NREM_AHI_ratio, applied
+#                    to Limb_idx (this project's most robust coefficient,
+#                    never previously feature-engineered)  [14 features]
 #
 # Planned (not yet implemented):
 #   - PLM periodicity index (PLM / isolated LM ratio)        Week 3+
@@ -20,7 +26,7 @@ def extract_caisr_enriched_features(algo_data):
     Enriched CAISR features requiring temporal cross-referencing
     between annotation channels.
 
-    Returns np.ndarray of length 11:
+    Returns np.ndarray of length 14:
         [0]  OA rate (events/hr)              — obstructive apnea
         [1]  CA rate (events/hr)              — central apnea
         [2]  HY rate (events/hr)              — hypopnea
@@ -32,12 +38,16 @@ def extract_caisr_enriched_features(algo_data):
         [8]  N3 first-half / second-half ratio — temporal N3 gradient
         [9]  Spontaneous arousal index        — non-respiratory arousals/hr
         [10] N3 confidence entropy            — slow-wave staging ambiguity
+        [11] Limb_REM (events/hr)             — limb movements during REM
+        [12] Limb_NREM (events/hr)            — limb movements during NREM
+        [13] Limb_REM / Limb_NREM ratio       — see precedent-risk note below
     """
     if not algo_data:
-        return np.full(11, float('nan'))
+        return np.full(14, float('nan'))
 
     resp       = algo_data.get('resp_caisr',    np.array([]))
     arousal    = algo_data.get('arousal_caisr', np.array([]))
+    limb       = algo_data.get('limb_caisr',    np.array([]))
     stages_raw = algo_data.get('stage_caisr',   np.array([]))
 
     total_hours_resp = len(resp) / 3600.0 if len(resp) > 0 else 0.0
@@ -165,6 +175,51 @@ def extract_caisr_enriched_features(algo_data):
         h = -(p * np.log(p) + (1.0 - p) * np.log(1.0 - p))
         n3_entropy = float(np.mean(h))
 
+    # [11-13] Stage-conditional limb movement index — NEW (2026-07-20)
+    # Direct analog of [5-7]'s REM/NREM-AHI split, applied to limb_caisr
+    # instead of resp_caisr. Limb_idx (caisr_base.py) is currently a single
+    # whole-night scalar — the same shape AHI was in v1, before this exact
+    # enrichment was applied to it. Limb_idx has been the single most
+    # robust non-demographic coefficient across all three coefficient-
+    # stability analyses this project has run (50/39/33-feature models),
+    # yet has never received any feature-engineering attention (all of it
+    # went to Spont_arousal_idx, which failed on every angle — see
+    # FEATURES.md's "Closed candidate" section). This is the natural next
+    # move on a proven-robust feature, using an already-validated
+    # intervention pattern rather than a new hypothesis.
+    #
+    # Precedent risk, stated up front rather than discovered later:
+    # REM_NREM_AHI_ratio (the exact analogous ratio for AHI) was one of
+    # the 11 Stage 1 sign-flip drops — only the two ABSOLUTE stage-
+    # conditional rates (REM_AHI, NREM_AHI) survived. Computing
+    # Limb_REM_NREM_ratio here anyway (rather than skipping it) so the
+    # coefficient-stability analysis can make that call on real evidence,
+    # same "let LOSO/coefficient-stability decide, don't pre-guess"
+    # discipline as everything else in this file — but if it flips sign
+    # the way its AHI analog did, that would not be a surprise.
+    limb_rem = limb_nrem = limb_rem_nrem_ratio = float('nan')
+    if len(valid_stages) > 0 and len(limb) > 0:
+        stage_1s_limb = np.repeat(valid_stages, 30)[:len(limb)]
+        rem_mask_limb  = (stage_1s_limb == 4)
+        nrem_mask_limb = (stage_1s_limb >= 1) & (stage_1s_limb <= 3)
+
+        rem_hours_limb  = float(rem_mask_limb.sum())  / 3600.0
+        nrem_hours_limb = float(nrem_mask_limb.sum()) / 3600.0
+
+        if rem_hours_limb > 0:
+            limb_rem_sig  = np.where(rem_mask_limb, limb[:len(rem_mask_limb)], 0)
+            edges_rem     = np.diff((limb_rem_sig > 0).astype(int), prepend=0)
+            limb_rem      = np.count_nonzero(edges_rem == 1) / rem_hours_limb
+
+        if nrem_hours_limb > 0:
+            limb_nrem_sig = np.where(nrem_mask_limb, limb[:len(nrem_mask_limb)], 0)
+            edges_nrem    = np.diff((limb_nrem_sig > 0).astype(int), prepend=0)
+            limb_nrem     = np.count_nonzero(edges_nrem == 1) / nrem_hours_limb
+
+        if (not np.isnan(limb_rem) and not np.isnan(limb_nrem)
+                and limb_nrem > 0):
+            limb_rem_nrem_ratio = limb_rem / limb_nrem
+
     return np.array([
         oa_rate, ca_rate, hy_rate, rera_rate,
         ca_total_ratio,
@@ -172,6 +227,7 @@ def extract_caisr_enriched_features(algo_data):
         n3_gradient,
         spont_arousal_idx,
         n3_entropy,
+        limb_rem, limb_nrem, limb_rem_nrem_ratio,
     ], dtype=float)
 
 
